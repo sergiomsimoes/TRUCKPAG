@@ -1,0 +1,340 @@
+#include "tlpp-core.th"
+#include "protheus.ch"
+#include "topconn.ch"
+
+namespace custom.transvale.truckpag
+
+/*/{Protheus.doc} ZTPG002
+TruckPag (MIT044 Cenario 2) - controle da integracao: parametros, numeracao das tabelas ZB*,
+hash do conteudo (idempotencia), busca de cliente/fornecedor por CNPJ, conversao de datas,
+valores e ids do JSON, trava do processamento e log das chamadas (ZB4).
+Nao depende de REST: serve a qualquer cenario (API do Sistema Gestao ou importacao por tela).
+@type function
+@author TOTVS (projeto TruckPag)
+@since 24/10/2026
+/*/
+
+/*/{Protheus.doc} tpgPar
+Le parametro MV_ZB* com valor padrao.
+@type function
+/*/
+User Function tpgPar(cPar as Character, xDef as Variant) as Variant
+Return SuperGetMV(cPar, .F., xDef)
+
+/*/{Protheus.doc} tpgSeq
+Proximo id (9 digitos) de uma tabela ZB*, sem reaproveitar id excluido.
+Deve ser chamado com a trava do processamento (tpgTrava) e dentro da transacao que grava o registro.
+cCpoChk/cPrefChk: para ZB1/ZB2, pula numero que ja exista no SE1/SE2 com o mesmo prefixo.
+@type function
+/*/
+User Function tpgSeq(cAlias as Character, cCampo as Character, cTabChk as Character, cPrefChk as Character) as Character
+    Local cQry   := ""
+    Local cTmp   := GetNextAlias()
+    Local nProx  := 0
+    Local cId    := ""
+    Local lLivre := .F.
+
+    cQry := "SELECT COALESCE(MAX(" + cCampo + "), '0') MX FROM " + RetSqlName(cAlias) + ;
+            " WHERE " + cAlias + "_FILIAL = '" + xFilial(cAlias) + "'"
+    MPSysOpenQuery(cQry, cTmp)
+    nProx := Val(AllTrim((cTmp)->MX)) + 1
+    (cTmp)->(DbCloseArea())
+
+    While !lLivre
+        cId := StrZero(nProx, 9)
+        lLivre := .T.
+        If !Empty(cTabChk)
+            lLivre := !U_tpgExisteNum(cTabChk, cPrefChk, cId)
+        EndIf
+        If !lLivre
+            nProx++
+        EndIf
+    EndDo
+Return cId
+
+/*/{Protheus.doc} tpgExisteNum
+Ha titulo no SE1/SE2 com este prefixo e numero (qualquer parcela/tipo)?
+@type function
+/*/
+User Function tpgExisteNum(cTab as Character, cPref as Character, cNum as Character) as Logical
+    Local cQry := ""
+    Local cTmp := GetNextAlias()
+    Local cPfx := IIf(cTab == "SE1", "E1", "E2")
+    Local lRet := .F.
+    cQry := "SELECT COUNT(*) QT FROM " + RetSqlName(cTab) + " WHERE " + cPfx + "_FILIAL = '" + xFilial(cTab) + "'" + ;
+            " AND " + cPfx + "_PREFIXO = '" + PadR(cPref, TamSX3(cPfx + "_PREFIXO")[1]) + "'" + ;
+            " AND " + cPfx + "_NUM = '" + PadR(cNum, TamSX3(cPfx + "_NUM")[1]) + "' AND D_E_L_E_T_ = ' '"
+    MPSysOpenQuery(cQry, cTmp)
+    lRet := (cTmp)->QT > 0
+    (cTmp)->(DbCloseArea())
+Return lRet
+
+/*/{Protheus.doc} tpgHash
+MD5 (hexadecimal) do texto canonico do pedido.
+@type function
+/*/
+User Function tpgHash(cTexto as Character) as Character
+Return Lower(MD5(cTexto, 2))
+
+/*/{Protheus.doc} tpgData
+Converte "dd/mm/aaaa" (ou "aaaa-mm-dd") em data. Devolve data vazia se invalida.
+@type function
+/*/
+User Function tpgData(xVal as Variant) as Date
+    Local dRet := CToD("")
+    Local cVal := ""
+    If ValType(xVal) == "D"
+        Return xVal
+    EndIf
+    If ValType(xVal) != "C"
+        Return dRet
+    EndIf
+    cVal := AllTrim(xVal)
+    If Len(cVal) == 10 .And. SubStr(cVal, 3, 1) == "/" .And. SubStr(cVal, 6, 1) == "/"
+        dRet := SToD(Right(cVal, 4) + SubStr(cVal, 4, 2) + Left(cVal, 2))
+    ElseIf Len(cVal) >= 10 .And. SubStr(cVal, 5, 1) == "-" .And. SubStr(cVal, 8, 1) == "-"
+        dRet := SToD(Left(cVal, 4) + SubStr(cVal, 6, 2) + SubStr(cVal, 9, 2))
+    EndIf
+Return dRet
+
+/*/{Protheus.doc} tpgNum
+Valor numerico vindo do JSON (numero ou texto com ponto/virgula). Nil -> 0.
+@type function
+/*/
+User Function tpgNum(xVal as Variant) as Numeric
+    Local nRet := 0
+    If ValType(xVal) == "N"
+        nRet := xVal
+    ElseIf ValType(xVal) == "C"
+        nRet := Val(StrTran(AllTrim(xVal), ",", "."))
+    EndIf
+Return Round(nRet, 2)
+
+/*/{Protheus.doc} tpgTxt
+Texto vindo do JSON (numero vira texto sem casas decimais quando inteiro).
+@type function
+/*/
+User Function tpgTxt(xVal as Variant) as Character
+    Local cRet := ""
+    If ValType(xVal) == "C"
+        cRet := AllTrim(xVal)
+    ElseIf ValType(xVal) == "N"
+        If xVal == Int(xVal)
+            cRet := cValToChar(Int(xVal))
+        Else
+            cRet := cValToChar(xVal)
+        EndIf
+    EndIf
+Return cRet
+
+/*/{Protheus.doc} tpgId
+Id devolvido ao Sistema Gestao (int) -> chave de 9 digitos das tabelas ZB*. Invalido -> "".
+@type function
+/*/
+User Function tpgId(xVal as Variant) as Character
+    Local cTxt := U_tpgTxt(xVal)
+    Local nI   := 0
+    If Empty(cTxt) .Or. Len(cTxt) > 9
+        Return ""
+    EndIf
+    For nI := 1 To Len(cTxt)
+        If !IsDigit(SubStr(cTxt, nI, 1))
+            Return ""
+        EndIf
+    Next nI
+Return StrZero(Val(cTxt), 9)
+
+/*/{Protheus.doc} tpgCnpj
+So os digitos do CNPJ/CPF.
+@type function
+/*/
+User Function tpgCnpj(xVal as Variant) as Character
+    Local cTxt := U_tpgTxt(xVal)
+    Local cRet := ""
+    Local nI   := 0
+    For nI := 1 To Len(cTxt)
+        If IsDigit(SubStr(cTxt, nI, 1))
+            cRet += SubStr(cTxt, nI, 1)
+        EndIf
+    Next nI
+Return cRet
+
+/*/{Protheus.doc} tpgCliente
+Cliente (SA1) pelo CNPJ. Devolve {codigo, loja, mensagem}; codigo vazio = nao achou ou bloqueado.
+@type function
+/*/
+User Function tpgCliente(cCnpj as Character) as Array
+Return tpgCadastro("SA1", "A1", cCnpj, "transportador (cliente)")
+
+/*/{Protheus.doc} tpgFornec
+Fornecedor (SA2) pelo CNPJ. Devolve {codigo, loja, mensagem}.
+@type function
+/*/
+User Function tpgFornec(cCnpj as Character) as Array
+Return tpgCadastro("SA2", "A2", cCnpj, "posto (fornecedor)")
+
+Static Function tpgCadastro(cTab as Character, cPfx as Character, cCnpj as Character, cQuem as Character) as Array
+    Local cQry := ""
+    Local cTmp := GetNextAlias()
+    Local aRet := {"", "", ""}
+    Local lBlq := .F.
+
+    If Empty(cCnpj)
+        aRet[3] := "CNPJ do " + cQuem + " nao informado"
+        Return aRet
+    EndIf
+    cQry := "SELECT " + cPfx + "_COD COD, " + cPfx + "_LOJA LOJA, " + cPfx + "_MSBLQL BLQ FROM " + RetSqlName(cTab) + ;
+            " WHERE " + cPfx + "_FILIAL = '" + xFilial(cTab) + "' AND " + cPfx + "_CGC = '" + cCnpj + "'" + ;
+            " AND D_E_L_E_T_ = ' ' ORDER BY " + cPfx + "_MSBLQL, " + cPfx + "_COD, " + cPfx + "_LOJA"
+    MPSysOpenQuery(cQry, cTmp)
+    If (cTmp)->(Eof())
+        aRet[3] := cQuem + " com CNPJ " + cCnpj + " nao cadastrado no Protheus"
+    Else
+        lBlq := (cTmp)->BLQ == "1"
+        If lBlq
+            aRet[3] := cQuem + " com CNPJ " + cCnpj + " esta bloqueado no cadastro"
+        Else
+            aRet[1] := (cTmp)->COD
+            aRet[2] := (cTmp)->LOJA
+        EndIf
+    EndIf
+    (cTmp)->(DbCloseArea())
+Return aRet
+
+/*/{Protheus.doc} tpgTrava
+Trava do processamento TruckPag por empresa/filial (o Sistema Gestao manda um lote por vez;
+a trava impede duas chamadas mexendo nos mesmos titulos ao mesmo tempo). Espera ate nSeg segundos.
+@type function
+/*/
+User Function tpgTrava(nSeg as Numeric) as Logical
+    Local nI   := 0
+    Local lRet := .F.
+    For nI := 1 To Max(1, nSeg)
+        If LockByName("ZTPG" + cEmpAnt + cFilAnt, .T., .F., .T.)
+            lRet := .T.
+            Exit
+        EndIf
+        Sleep(1000)
+    Next nI
+Return lRet
+
+/*/{Protheus.doc} tpgSolta
+Solta a trava do processamento.
+@type function
+/*/
+User Function tpgSolta()
+    UnLockByName("ZTPG" + cEmpAnt + cFilAnt, .T., .F., .T.)
+Return Nil
+
+/*/{Protheus.doc} tpgDtHr
+Data e hora AAAAMMDDHHMMSS.
+@type function
+/*/
+User Function tpgDtHr() as Character
+Return DToS(Date()) + StrTran(Time(), ":", "")
+
+/*/{Protheus.doc} tpgGravaLog
+Grava a chamada no ZB4 (pedido, resposta, contagem).
+@type function
+/*/
+User Function tpgGravaLog(cId as Character, cApi as Character, cHttp as Character, nQtd as Numeric, nErr as Numeric, cBody as Character, cResp as Character)
+    DbSelectArea("ZB4")
+    RecLock("ZB4", .T.)
+        ZB4->ZB4_FILIAL := xFilial("ZB4")
+        ZB4->ZB4_ID     := cId
+        ZB4->ZB4_API    := cApi
+        ZB4->ZB4_DTHR   := U_tpgDtHr()
+        ZB4->ZB4_USER   := cUserName
+        ZB4->ZB4_HTTP   := cHttp
+        ZB4->ZB4_QTD    := nQtd
+        ZB4->ZB4_QTDERR := nErr
+        ZB4->ZB4_BODY   := cBody
+        ZB4->ZB4_RESP   := cResp
+    ZB4->(MsUnlock())
+Return Nil
+
+/*/{Protheus.doc} tpgErroAuto
+Resume o log da rotina automatica (GetAutoGRLog) numa linha legivel.
+@type function
+/*/
+User Function tpgErroAuto(cPadrao as Character) as Character
+    Local aLog := GetAutoGRLog()
+    Local cRet := ""
+    Local cLin := ""
+    Local nI   := 0
+    If ValType(aLog) == "A"
+        For nI := 1 To Len(aLog)
+            cLin := AllTrim(StrTran(StrTran(aLog[nI], Chr(13), " "), Chr(10), " "))
+            If !Empty(cLin) .And. !("----" $ cLin)
+                cRet += IIf(Empty(cRet), "", " | ") + cLin
+            EndIf
+            If Len(cRet) > 400
+                Exit
+            EndIf
+        Next nI
+    EndIf
+    If Empty(cRet)
+        cRet := cPadrao + " (rotina automatica recusou sem mensagem; ver console.log do AppServer)"
+    EndIf
+Return Left(cRet, 400)
+
+/*/{Protheus.doc} tpgFechaTran
+Fecha transacao aberta deixada por erro inesperado (desfaz).
+@type function
+/*/
+User Function tpgFechaTran()
+    If InTransact()
+        DisarmTransaction()
+        EndTran()
+    EndIf
+Return Nil
+
+/*/{Protheus.doc} tpgIds
+Lista de ids do JSON -> array de chaves de 9 digitos, sem repetir, ordenado. Id invalido vira "#<valor>".
+@type function
+/*/
+User Function tpgIds(aIds as Array) as Array
+    Local aRet := {}
+    Local nI   := 0
+    Local cId  := ""
+    If ValType(aIds) != "A"
+        Return aRet
+    EndIf
+    For nI := 1 To Len(aIds)
+        cId := U_tpgId(aIds[nI])
+        If Empty(cId)
+            cId := "#" + U_tpgTxt(aIds[nI])
+        EndIf
+        If aScan(aRet, cId) == 0
+            aAdd(aRet, cId)
+        EndIf
+    Next nI
+    aSort(aRet)
+Return aRet
+
+/*/{Protheus.doc} tpgJunta
+Junta array de textos com separador.
+@type function
+/*/
+User Function tpgJunta(aLst as Array, cSep as Character) as Character
+    Local cRet := ""
+    Local nI   := 0
+    For nI := 1 To Len(aLst)
+        cRet += IIf(nI > 1, cSep, "") + aLst[nI]
+    Next nI
+Return cRet
+
+/*/{Protheus.doc} tpgBanco
+Banco/agencia/conta de um parametro "banco/agencia/conta" (P-05).
+@type function
+/*/
+User Function tpgBanco(cPar as Character) as Array
+    Local cVal := AllTrim(U_tpgPar(cPar, ""))
+    Local aRet := StrTokArr2(cVal, "/", .T.)
+    If Len(aRet) < 3
+        aRet := {"", "", ""}
+    EndIf
+    aRet[1] := PadR(aRet[1], TamSX3("A6_COD")[1])
+    aRet[2] := PadR(aRet[2], TamSX3("A6_AGENCIA")[1])
+    aRet[3] := PadR(aRet[3], TamSX3("A6_NUMCON")[1])
+Return aRet

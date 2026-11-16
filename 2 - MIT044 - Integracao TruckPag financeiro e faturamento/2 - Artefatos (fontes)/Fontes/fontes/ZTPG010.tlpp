@@ -1,0 +1,999 @@
+#include "tlpp-core.th"
+#include "tlpp-rest.th"
+#include "protheus.ch"
+
+using namespace custom.transvale.truckpag
+
+/*/{Protheus.doc} ZTPG010
+TruckPag (MIT044 Cenario 2) - servicos REST (POST) que o Sistema Gestao chama.
+  POST /transvale/truckpag/v1/titulo-provisorio   API 01  U_ZTPG011
+  POST /transvale/truckpag/v1/estorno             API 02  U_ZTPG012
+  POST /transvale/truckpag/v1/fatura-cliente      API 03  U_ZTPG013
+  POST /transvale/truckpag/v1/fatura-fornecedor   API 04  U_ZTPG014
+  POST /transvale/truckpag/v1/baixa-receber       API 06  U_ZTPG016
+  POST /transvale/truckpag/v1/baixa-pagar         API 07  U_ZTPG017
+API 05 (negociacao) e API 08 (nota de servico) fora desta etapa.
+Contratos: MIT044 2.3.1 a 2.3.7. Propostas configuraveis: MV_ZBRETOR (P-06 retorno item a item com eco do
+nrNfFornec), MV_ZBIDEMP (P-06/P-13 reenvio igual devolve o mesmo resultado; diferente e recusado).
+As regras do financeiro estao em ZTPG001 (servem tambem ao Cenario 1); o controle, em ZTPG002.
+@type function
+@author TOTVS (projeto TruckPag)
+@since 24/10/2026
+/*/
+
+@Post("/transvale/truckpag/v1/titulo-provisorio")
+User Function ZTPG011()
+    Executa("01", {|oIn, cLog| Api01(oIn, cLog)})
+Return
+
+@Post("/transvale/truckpag/v1/estorno")
+User Function ZTPG012()
+    Executa("02", {|oIn, cLog| Api02(oIn, cLog)})
+Return
+
+@Post("/transvale/truckpag/v1/fatura-cliente")
+User Function ZTPG013()
+    Executa("03", {|oIn, cLog| ApiFatura(oIn, cLog, "R")})
+Return
+
+@Post("/transvale/truckpag/v1/fatura-fornecedor")
+User Function ZTPG014()
+    Executa("04", {|oIn, cLog| ApiFatura(oIn, cLog, "P")})
+Return
+
+@Post("/transvale/truckpag/v1/baixa-receber")
+User Function ZTPG016()
+    Executa("06", {|oIn, cLog| ApiBaixa(oIn, cLog, "R")})
+Return
+
+@Post("/transvale/truckpag/v1/baixa-pagar")
+User Function ZTPG017()
+    Executa("07", {|oIn, cLog| ApiBaixa(oIn, cLog, "P")})
+Return
+
+//-------------------------------------------------------------------------------------------------
+// Moldura comum: le o JSON, prende a trava, chama a API, grava o log (ZB4) e responde uma vez so.
+//-------------------------------------------------------------------------------------------------
+Static Function Executa(cApi as Character, bProc as CodeBlock)
+    Local cBody  := oRest:GetBodyRequest()
+    Local cTexto := ""
+    Local oIn    := JsonObject():New()
+    Local xErr   := Nil
+    Local aRes   := {}
+    Local cResp  := ""
+    Local cFatal := ""
+    Local cLog   := ""
+    Local nHttp  := 200
+    Local cFilBk := cFilAnt
+    Local cFilTP := ""
+    Local lTrava := .F.
+
+    cTexto := DecodeUTF8(cBody)
+    If ValType(cTexto) != "C"
+        cTexto := cBody
+    EndIf
+    xErr := oIn:FromJson(cTexto)
+    If ValType(xErr) == "C" .And. !Empty(xErr)
+        Resp(400, '{"erro":"corpo da requisicao nao e um JSON valido"}')
+        Return Nil
+    EndIf
+
+    cFilTP := AllTrim(U_tpgPar("MV_ZBFIL", ""))
+    If !Empty(cFilTP) .And. cFilTP != AllTrim(cFilAnt)
+        cFilAnt := PadR(cFilTP, Len(cFilAnt))
+    EndIf
+
+    lTrava := U_tpgTrava(60)
+    If !lTrava
+        cFilAnt := cFilBk
+        Resp(503, '{"erro":"outro lote do TruckPag esta sendo processado; reenvie em instantes"}')
+        Return Nil
+    EndIf
+
+    try
+        AbreSX()
+        cLog := U_tpgSeq("ZB4", "ZB4_ID", "", "")
+        aRes := Eval(bProc, oIn, cLog)
+        nHttp := aRes[1]
+        cResp := aRes[2]:ToJson()
+    catch oErr
+        cFatal := oErr:Description + " | " + Left(oErr:ErrorStack, 600)
+        U_tpgFechaTran()
+    endtry
+
+    If !Empty(cFatal)
+        nHttp := 500
+        cResp := '{"erro":"falha inesperada no Protheus: ' + EscJson(Left(cFatal, 300)) + '"}'
+        aRes  := {500, Nil, 0, 0}
+    EndIf
+    try
+        If !Empty(cLog)
+            U_tpgGravaLog(cLog, cApi, cValToChar(nHttp), aRes[3], aRes[4], cTexto, cResp)
+        EndIf
+    catch oErrLog
+        FwLogMsg("ERROR", , "ZTPG010", , , , "nao gravou o log ZB4: " + oErrLog:Description)
+    endtry
+    U_tpgSolta()
+    cFilAnt := cFilBk
+    Resp(nHttp, cResp)
+Return Nil
+
+Static Function Resp(nHttp as Numeric, cJson as Character)
+    Local cOut := EncodeUTF8(cJson)
+    If ValType(cOut) != "C"
+        cOut := cJson
+    EndIf
+    oRest:SetStatusCode(nHttp)
+    oRest:SetKeyHeaderResponse("Content-Type", "application/json; charset=utf-8")
+    oRest:SetResponse(cOut)
+Return Nil
+
+Static Function EscJson(cTxt as Character) as Character
+    cTxt := StrTran(cTxt, "\", "\\")
+    cTxt := StrTran(cTxt, '"', '\"')
+    cTxt := StrTran(cTxt, Chr(13), " ")
+    cTxt := StrTran(cTxt, Chr(10), " ")
+Return cTxt
+
+Static Function AbreSX()
+    Local aSX := {"SX2", "SX3", "SIX", "SX6", "SX8", "SX7", "SXB", "SX5"}
+    Local nI  := 0
+    // ChkFile so abre o que ainda nao estiver aberto (thread REST nasce sem os SX)
+    For nI := 1 To Len(aSX)
+        ChkFile(aSX[nI], .F.)
+    Next nI
+    DbSelectArea("ZB0")
+    DbSelectArea("ZB1")
+    DbSelectArea("ZB2")
+    DbSelectArea("ZB3")
+    DbSelectArea("ZB4")
+Return Nil
+
+Static Function ModoMIT() as Logical
+Return AllTrim(U_tpgPar("MV_ZBRETOR", "1")) == "2"
+
+// Itens de uma lista do JSON (array de objetos); tolera Nil.
+Static Function Lista(xVal) as Array
+    If ValType(xVal) == "A"
+        Return xVal
+    EndIf
+Return {}
+
+Static Function IdsJson(aIds as Array) as Array
+    Local aRet := {}
+    Local nI   := 0
+    For nI := 1 To Len(aIds)
+        If Left(aIds[nI], 1) == "#"
+            aAdd(aRet, SubStr(aIds[nI], 2))
+        Else
+            aAdd(aRet, Val(aIds[nI]))
+        EndIf
+    Next nI
+Return aRet
+
+//-------------------------------------------------------------------------------------------------
+// API 01 - IncluirTituloProvisorio: {"body":[{"dadosNotas":[{...}]}]}
+//-------------------------------------------------------------------------------------------------
+Static Function Api01(oIn, cLog as Character) as Array
+    Local aGrp  := Lista(oIn["body"])
+    Local aNot  := {}
+    Local aOut  := {}
+    Local oOut  := JsonObject():New()
+    Local nI    := 0
+    Local nJ    := 0
+    Local nErr  := 0
+    Local nMax  := U_tpgPar("MV_ZBLOTE", 1000)
+    Local aR    := {}
+
+    For nI := 1 To Len(aGrp)
+        If ValType(aGrp[nI]) == "J"
+            For nJ := 1 To Len(Lista(aGrp[nI]["dadosNotas"]))
+                aAdd(aNot, aGrp[nI]["dadosNotas"][nJ])
+            Next nJ
+        EndIf
+    Next nI
+    If Len(aNot) == 0
+        oOut["transacoes"] := {}
+        oOut["erro"] := "nenhuma transacao em body[].dadosNotas[]"
+        Return {400, oOut, 0, 0}
+    EndIf
+    If ValType(nMax) == "N" .And. nMax > 0 .And. Len(aNot) > nMax
+        oOut["transacoes"] := {}
+        oOut["erro"] := "lote com " + cValToChar(Len(aNot)) + " transacoes; o maximo por chamada e " + cValToChar(nMax)
+        Return {400, oOut, Len(aNot), Len(aNot)}
+    EndIf
+    For nI := 1 To Len(aNot)
+        aR := Inc01(aNot[nI], cLog)
+        aAdd(aOut, aR[1])
+        If !aR[2]
+            nErr++
+        EndIf
+    Next nI
+    oOut["transacoes"] := aOut
+Return {IIf(nErr > 0 .And. ModoMIT(), 400, 200), oOut, Len(aNot), nErr}
+
+Static Function Inc01(oNota, cLog as Character) as Array
+    Local oR     := JsonObject():New()
+    Local lMit   := ModoMIT()
+    Local lIdem  := U_tpgPar("MV_ZBIDEMP", .T.)
+    Local cNr    := ""
+    Local cBe    := ""
+    Local cPg    := ""
+    Local cMBe   := ""
+    Local cMPg   := ""
+    Local dEm    := CToD("")
+    Local nRec   := 0
+    Local nPag   := 0
+    Local cHash  := ""
+    Local cErrR  := ""
+    Local cErrP  := ""
+    Local aCli   := {}
+    Local aFor   := {}
+    Local cIdT   := ""
+    Local cIdR   := ""
+    Local cIdP   := ""
+    Local aR     := {}
+    Local cPrefR := U_tpgPar("MV_ZBPREFR", "TPG")
+    Local cPrefP := U_tpgPar("MV_ZBPREFP", "TPG")
+    Local cTipoR := U_tpgPar("MV_ZBTIPOR", "DP")
+    Local cTipoP := U_tpgPar("MV_ZBTIPOP", "DP")
+    Local cNatR  := U_tpgPar("MV_ZBNATRP", "")
+    Local cNatP  := U_tpgPar("MV_ZBNATPP", "")
+
+    If ValType(oNota) != "J"
+        oR["erroRecebimento"] := "item invalido"
+        oR["erroPagamento"]   := "item invalido"
+        Return {oR, .F.}
+    EndIf
+    cNr  := U_tpgTxt(oNota["nrNfFornec"])
+    cBe  := U_tpgCnpj(oNota["nrCpfCnpjBeneficiario"])
+    cPg  := U_tpgCnpj(oNota["nrCpfCnpjPagador"])
+    cMBe := U_tpgTxt(oNota["cdMunicipioBeneficiario"])
+    cMPg := U_tpgTxt(oNota["cdMunicipioPagador"])
+    dEm  := U_tpgData(oNota["dtEmissaoFornec"])
+    nRec := U_tpgNum(oNota["vlRecebido"])
+    nPag := U_tpgNum(oNota["vlPago"])
+    If !lMit
+        oR["nrNfFornec"] := oNota["nrNfFornec"]
+    EndIf
+
+    If Empty(cNr)
+        cErrR := "nrNfFornec nao informado"
+        cErrP := cErrR
+    ElseIf Len(cNr) > 20
+        cErrR := "nrNfFornec com mais de 20 caracteres"
+        cErrP := cErrR
+    EndIf
+    If Empty(cErrR) .And. Empty(dEm)
+        cErrR := "dtEmissaoFornec invalida (esperado dd/mm/aaaa)"
+        cErrP := cErrR
+    EndIf
+    If Empty(cErrR) .And. nRec <= 0
+        cErrR := "vlRecebido deve ser maior que zero"
+    EndIf
+    If Empty(cErrP) .And. nPag <= 0
+        cErrP := "vlPago deve ser maior que zero"
+    EndIf
+
+    cHash := U_tpgHash("I|" + cNr + "|" + cBe + "|" + cMBe + "|" + cPg + "|" + cMPg + "|" + DToS(dEm) + "|" + ;
+                       Str(nRec, 16, 2) + "|" + Str(nPag, 16, 2))
+
+    If Empty(cErrR) .And. Empty(cErrP) .And. lIdem
+        ZB0->(DbSetOrder(2))
+        If ZB0->(DbSeek(xFilial("ZB0") + "I" + PadR(cNr, TamSX3("ZB0_NRNF")[1])))
+            If AllTrim(ZB0->ZB0_HASH) == cHash
+                oR["idPagamento"]   := Val(ZB0->ZB0_IDPAG)
+                oR["idRecebimento"] := Val(ZB0->ZB0_IDREC)
+                If !lMit
+                    oR["situacao"] := "ja recebido: devolvidos os mesmos ids, nada lancado de novo"
+                EndIf
+                Return {oR, .T.}
+            EndIf
+            cErrR := "nrNfFornec " + cNr + " ja recebido em " + DtHrTxt(ZB0->ZB0_DTHR) + " com outro conteudo (idRecebimento " + ;
+                     cValToChar(Val(ZB0->ZB0_IDREC)) + ", idPagamento " + cValToChar(Val(ZB0->ZB0_IDPAG)) + "); para corrigir, use o estorno (API 02)"
+            cErrP := cErrR
+        EndIf
+    EndIf
+
+    If Empty(cErrR) .And. Empty(cErrP)
+        aCli := U_tpgCliente(cPg)
+        aFor := U_tpgFornec(cBe)
+        If Empty(aCli[1])
+            cErrR := aCli[3]
+        EndIf
+        If Empty(aFor[1])
+            cErrP := aFor[3]
+        EndIf
+    EndIf
+
+    If Empty(cErrR) .And. Empty(cErrP)
+        Begin Transaction
+            cIdT := U_tpgSeq("ZB0", "ZB0_IDTRAN", "", "")
+            cIdR := U_tpgSeq("ZB1", "ZB1_ID", "SE1", cPrefR)
+            aR := U_tpgIncRec(cPrefR, cIdR, cTipoR, cNatR, aCli[1], aCli[2], dEm, dEm, nRec, "TRUCKPAG " + cNr)
+            If !aR[1]
+                cErrR := aR[2]
+                DisarmTransaction()
+            Else
+                GravaZB1(cIdR, "R", cIdT, "I", cPrefR, cTipoR, aCli[1], aCli[2], nRec)
+                cIdP := U_tpgSeq("ZB1", "ZB1_ID", "SE2", cPrefP)
+                aR := U_tpgIncPag(cPrefP, cIdP, cTipoP, cNatP, aFor[1], aFor[2], dEm, dEm, nPag, "TRUCKPAG " + cNr)
+                If !aR[1]
+                    cErrP := aR[2]
+                    DisarmTransaction()
+                Else
+                    GravaZB1(cIdP, "P", cIdT, "I", cPrefP, cTipoP, aFor[1], aFor[2], nPag)
+                    GravaZB0(cIdT, "I", cNr, cBe, cPg, cMBe, cMPg, dEm, nRec, nPag, cIdR, cIdP, "", "", cHash, cLog)
+                EndIf
+            EndIf
+        End Transaction
+    EndIf
+
+    If !Empty(cErrR) .Or. !Empty(cErrP)
+        If Empty(cErrR)
+            cErrR := "transacao nao incluida (erro na perna a pagar)"
+        EndIf
+        If Empty(cErrP)
+            cErrP := "transacao nao incluida (erro na perna a receber)"
+        EndIf
+        oR["erroPagamento"]   := cErrP
+        oR["erroRecebimento"] := cErrR
+        Return {oR, .F.}
+    EndIf
+    oR["idPagamento"]   := Val(cIdP)
+    oR["idRecebimento"] := Val(cIdR)
+    If !lMit
+        oR["situacao"] := "incluido"
+    EndIf
+Return {oR, .T.}
+
+//-------------------------------------------------------------------------------------------------
+// API 02 - EstornarTituloProvisorio: {"body":[{... "idNotaFiscal": idPagamento da original}]}
+//-------------------------------------------------------------------------------------------------
+Static Function Api02(oIn, cLog as Character) as Array
+    Local aItens := Lista(oIn["body"])
+    Local aOut   := {}
+    Local oOut   := JsonObject():New()
+    Local nI     := 0
+    Local nErr   := 0
+    Local aR     := {}
+    If Len(aItens) == 0
+        oOut["transacoes"] := {}
+        oOut["erro"] := "nenhum estorno em body[]"
+        Return {400, oOut, 0, 0}
+    EndIf
+    For nI := 1 To Len(aItens)
+        aR := Est02(aItens[nI], cLog)
+        aAdd(aOut, aR[1])
+        If !aR[2]
+            nErr++
+        EndIf
+    Next nI
+    oOut["transacoes"] := aOut
+Return {IIf(nErr > 0 .And. ModoMIT(), 400, 200), oOut, Len(aItens), nErr}
+
+Static Function Est02(oNota, cLog as Character) as Array
+    Local oR     := JsonObject():New()
+    Local lMit   := ModoMIT()
+    Local lIdem  := U_tpgPar("MV_ZBIDEMP", .T.)
+    Local cNr    := ""
+    Local cBe    := ""
+    Local cPg    := ""
+    Local cMBe   := ""
+    Local cMPg   := ""
+    Local dEm    := CToD("")
+    Local nRec   := 0
+    Local nPag   := 0
+    Local cIdNF  := ""
+    Local cHash  := ""
+    Local cErr   := ""
+    Local cErrR  := ""
+    Local cErrP  := ""
+    Local cTrOri := ""
+    Local aOriR  := {}
+    Local aOriP  := {}
+    Local nOriR  := 0
+    Local nOriP  := 0
+    Local cOriBe := ""
+    Local cOriPg := ""
+    Local cOriNr := ""
+    Local cIdE   := ""
+    Local cIdR   := ""
+    Local cIdP   := ""
+    Local aR     := {}
+    Local cPrefR := U_tpgPar("MV_ZBPREFR", "TPG")
+    Local cPrefP := U_tpgPar("MV_ZBPREFP", "TPG")
+    Local cNatR  := U_tpgPar("MV_ZBNATRP", "")
+    Local cNatP  := U_tpgPar("MV_ZBNATPP", "")
+    Local cNCC   := Left(MV_CRNEG, 3)
+    Local cNDF   := Left(MV_CPNEG, 3)
+
+    If ValType(oNota) != "J"
+        oR["erroRecebimento"] := "item invalido"
+        oR["erroPagamento"]   := "item invalido"
+        Return {oR, .F.}
+    EndIf
+    cNr   := U_tpgTxt(oNota["nrNfFornec"])
+    cBe   := U_tpgCnpj(oNota["nrCpfCnpjBeneficiario"])
+    cPg   := U_tpgCnpj(oNota["nrCpfCnpjPagador"])
+    cMBe  := U_tpgTxt(oNota["cdMunicipioBeneficiario"])
+    cMPg  := U_tpgTxt(oNota["cdMunicipioPagador"])
+    dEm   := U_tpgData(oNota["dtEmissaoFornec"])
+    nRec  := Abs(U_tpgNum(oNota["vlRecebido"]))
+    nPag  := Abs(U_tpgNum(oNota["vlPago"]))
+    cIdNF := U_tpgId(oNota["idNotaFiscal"])
+    If !lMit
+        oR["nrNfFornec"] := oNota["nrNfFornec"]
+    EndIf
+
+    Do Case
+        Case Empty(cNr)
+            cErr := "nrNfFornec nao informado"
+        Case Empty(dEm)
+            cErr := "dtEmissaoFornec invalida (esperado dd/mm/aaaa)"
+        Case Empty(cIdNF)
+            cErr := "idNotaFiscal (idPagamento da transacao original) nao informado ou invalido"
+        Case nRec <= 0 .Or. nPag <= 0
+            cErr := "vlRecebido e vlPago do estorno devem ser diferentes de zero"
+    EndCase
+
+    cHash := U_tpgHash("E|" + cNr + "|" + cBe + "|" + cMBe + "|" + cPg + "|" + cMPg + "|" + DToS(dEm) + "|" + ;
+                       Str(nRec, 16, 2) + "|" + Str(nPag, 16, 2) + "|" + cIdNF)
+
+    If Empty(cErr) .And. lIdem
+        ZB0->(DbSetOrder(2))
+        If ZB0->(DbSeek(xFilial("ZB0") + "E" + PadR(cNr, TamSX3("ZB0_NRNF")[1])))
+            If AllTrim(ZB0->ZB0_HASH) == cHash
+                oR["idPagamento"]   := Val(ZB0->ZB0_IDPAG)
+                oR["idRecebimento"] := Val(ZB0->ZB0_IDREC)
+                oR["idEstorno"]     := Val(ZB0->ZB0_IDTRAN)
+                If !lMit
+                    oR["situacao"] := "ja recebido: devolvidos os mesmos ids, nada lancado de novo"
+                EndIf
+                Return {oR, .T.}
+            EndIf
+            cErr := "estorno com nrNfFornec " + cNr + " ja recebido em " + DtHrTxt(ZB0->ZB0_DTHR) + " com outro conteudo (idEstorno " + ;
+                    cValToChar(Val(ZB0->ZB0_IDTRAN)) + ")"
+        EndIf
+    EndIf
+
+    // Transacao original pelo idPagamento devolvido na API 01
+    If Empty(cErr)
+        ZB1->(DbSetOrder(1))
+        If !ZB1->(DbSeek(xFilial("ZB1") + cIdNF)) .Or. ZB1->ZB1_CART != "P" .Or. ZB1->ZB1_OPER != "I"
+            cErr := "idNotaFiscal " + cValToChar(Val(cIdNF)) + " nao e um idPagamento devolvido pela API 01"
+        Else
+            cTrOri := ZB1->ZB1_IDTRAN
+            aOriP  := {ZB1->ZB1_CLIFOR, ZB1->ZB1_LOJA}
+            nOriP  := ZB1->ZB1_VALOR
+            ZB0->(DbSetOrder(1))
+            ZB0->(DbSeek(xFilial("ZB0") + cTrOri))
+            cOriBe := AllTrim(ZB0->ZB0_CNPJBE)
+            cOriPg := AllTrim(ZB0->ZB0_CNPJPG)
+            cOriNr := AllTrim(ZB0->ZB0_NRNF)
+            ZB1->(DbSetOrder(2))
+            If ZB1->(DbSeek(xFilial("ZB1") + cTrOri + "R"))
+                aOriR := {ZB1->ZB1_CLIFOR, ZB1->ZB1_LOJA}
+                nOriR := ZB1->ZB1_VALOR
+            EndIf
+            ZB0->(DbSetOrder(3))
+            If ZB0->(DbSeek(xFilial("ZB0") + cTrOri))
+                cErr := "a transacao original (nrNfFornec " + cOriNr + ") ja foi estornada: idEstorno " + cValToChar(Val(ZB0->ZB0_IDTRAN))
+            ElseIf !Empty(cBe) .And. cBe != cOriPg
+                cErr := "nrCpfCnpjBeneficiario do estorno deve ser o cliente da transacao original (" + cOriPg + ")"
+            ElseIf !Empty(cPg) .And. cPg != cOriBe
+                cErr := "nrCpfCnpjPagador do estorno deve ser o posto da transacao original (" + cOriBe + ")"
+            ElseIf Len(aOriR) == 0
+                cErr := "transacao original sem titulo a receber no controle"
+            ElseIf nRec > nOriR .Or. nPag > nOriP
+                cErr := "valor do estorno maior que o da transacao original (" + cValToChar(nOriR) + " / " + cValToChar(nOriP) + ")"
+            EndIf
+        EndIf
+    EndIf
+
+    If Empty(cErr)
+        Begin Transaction
+            cIdE := U_tpgSeq("ZB0", "ZB0_IDTRAN", "", "")
+            cIdR := U_tpgSeq("ZB1", "ZB1_ID", "SE1", cPrefR)
+            aR := U_tpgIncRec(cPrefR, cIdR, cNCC, cNatR, aOriR[1], aOriR[2], dEm, dEm, nRec, "TRUCKPAG ESTORNO " + cOriNr)
+            If !aR[1]
+                cErrR := aR[2]
+                DisarmTransaction()
+            Else
+                GravaZB1(cIdR, "R", cIdE, "E", cPrefR, cNCC, aOriR[1], aOriR[2], nRec)
+                cIdP := U_tpgSeq("ZB1", "ZB1_ID", "SE2", cPrefP)
+                aR := U_tpgIncPag(cPrefP, cIdP, cNDF, cNatP, aOriP[1], aOriP[2], dEm, dEm, nPag, "TRUCKPAG ESTORNO " + cOriNr)
+                If !aR[1]
+                    cErrP := aR[2]
+                    DisarmTransaction()
+                Else
+                    GravaZB1(cIdP, "P", cIdE, "E", cPrefP, cNDF, aOriP[1], aOriP[2], nPag)
+                    GravaZB0(cIdE, "E", cNr, cBe, cPg, cMBe, cMPg, dEm, nRec, nPag, cIdR, cIdP, cIdNF, cTrOri, cHash, cLog)
+                EndIf
+            EndIf
+        End Transaction
+    Else
+        cErrR := cErr
+        cErrP := cErr
+    EndIf
+
+    If !Empty(cErrR) .Or. !Empty(cErrP)
+        oR["erroPagamento"]   := IIf(Empty(cErrP), "estorno nao incluido (erro na perna a receber)", cErrP)
+        oR["erroRecebimento"] := IIf(Empty(cErrR), "estorno nao incluido (erro na perna a pagar)", cErrR)
+        Return {oR, .F.}
+    EndIf
+    oR["idPagamento"]   := Val(cIdP)
+    oR["idRecebimento"] := Val(cIdR)
+    oR["idEstorno"]     := Val(cIdE)
+    If !lMit
+        oR["situacao"] := "incluido"
+    EndIf
+Return {oR, .T.}
+
+//-------------------------------------------------------------------------------------------------
+// API 03 / 04 - FecharFaturaCliente / FecharFaturaFornecedor: {"body":[{"idsRecebimento":[...]}]}
+//-------------------------------------------------------------------------------------------------
+Static Function ApiFatura(oIn, cLog as Character, cCart as Character) as Array
+    Local aItens := Lista(oIn["body"])
+    Local aOut   := {}
+    Local oOut   := JsonObject():New()
+    Local nI     := 0
+    Local nErr   := 0
+    Local aR     := {}
+    If Len(aItens) == 0
+        oOut["faturas"] := {}
+        oOut["erro"] := "nenhuma fatura em body[]"
+        Return {400, oOut, 0, 0}
+    EndIf
+    For nI := 1 To Len(aItens)
+        aR := Fatura(aItens[nI], cLog, cCart)
+        aAdd(aOut, aR[1])
+        If !aR[2]
+            nErr++
+        EndIf
+    Next nI
+    oOut["faturas"] := aOut
+Return {IIf(nErr > 0 .And. ModoMIT(), 400, 200), oOut, Len(aItens), nErr}
+
+Static Function Fatura(oB, cLog as Character, cCart as Character) as Array
+    Local oR     := JsonObject():New()
+    Local lMit   := ModoMIT()
+    Local lRec   := (cCart == "R")
+    Local cOper  := IIf(lRec, "FR", "FP")
+    Local cTab   := IIf(lRec, "SE1", "SE2")
+    Local cCampo := IIf(lRec, "idsRecebimento", "idsPagamento")
+    Local aIds   := {}
+    Local cHash  := ""
+    Local cErr   := ""
+    Local nI     := 0
+    Local cCli   := ""
+    Local cLoja  := ""
+    Local aDocs  := {}
+    Local aRecId := {}
+    Local nRec   := 0
+    Local nRecO  := 0
+    Local lCred  := .F.
+    Local cIdF   := ""
+    Local aF     := {}
+    Local cCond  := ""
+    Local cPref  := IIf(lRec, U_tpgPar("MV_ZBPRFFR", "TPF"), U_tpgPar("MV_ZBPRFFP", "TPF"))
+    Local cNat   := IIf(lRec, U_tpgPar("MV_ZBNATFR", ""), U_tpgPar("MV_ZBNATFP", ""))
+    Local cTipo  := U_tpgPar("MV_ZBTIPFT", "FT")
+    Local cCnpj  := ""
+
+    If ValType(oB) != "J"
+        oR["erro"] := "item invalido"
+        Return {oR, .F.}
+    EndIf
+    aIds := U_tpgIds(oB[cCampo])
+    oR["documentos"] := IdsJson(aIds)
+    If Len(aIds) == 0
+        oR["erro"] := cCampo + " vazio"
+        Return {oR, .F.}
+    EndIf
+    cHash := U_tpgHash(cOper + "|" + U_tpgJunta(aIds, ","))
+
+    ZB2->(DbSetOrder(2))
+    If ZB2->(DbSeek(xFilial("ZB2") + cOper + PadR(cHash, TamSX3("ZB2_HASH")[1])))
+        oR["idFatura"] := Val(ZB2->ZB2_ID)
+        If !lMit
+            oR["valor"]    := ZB2->ZB2_VALOR
+            oR["situacao"] := "ja recebida: devolvida a mesma fatura, nada lancado de novo"
+        EndIf
+        Return {oR, .T.}
+    EndIf
+
+    For nI := 1 To Len(aIds)
+        If Left(aIds[nI], 1) == "#"
+            cErr := "id invalido: " + SubStr(aIds[nI], 2)
+            Exit
+        EndIf
+        ZB1->(DbSetOrder(1))
+        If !ZB1->(DbSeek(xFilial("ZB1") + aIds[nI]))
+            cErr := "documento " + cValToChar(Val(aIds[nI])) + " nao encontrado (nao foi devolvido pelas APIs 01/02)"
+            Exit
+        EndIf
+        If ZB1->ZB1_CART != cCart
+            cErr := "documento " + cValToChar(Val(aIds[nI])) + IIf(lRec, " e um idPagamento (use a API 04)", " e um idRecebimento (use a API 03)")
+            Exit
+        EndIf
+        If !Empty(ZB1->ZB1_IDAGR)
+            cErr := "documento " + cValToChar(Val(aIds[nI])) + " ja esta na fatura " + cValToChar(Val(ZB1->ZB1_IDAGR))
+            Exit
+        EndIf
+        If Empty(cCli)
+            cCli  := ZB1->ZB1_CLIFOR
+            cLoja := ZB1->ZB1_LOJA
+        ElseIf ZB1->ZB1_CLIFOR + ZB1->ZB1_LOJA != cCli + cLoja
+            cErr := "os documentos sao de mais de um " + IIf(lRec, "transportador", "posto") + " (uma fatura por " + IIf(lRec, "cliente", "fornecedor") + ")"
+            Exit
+        EndIf
+        nRec := RecnoTit(cTab, ZB1->ZB1_PREFIX, ZB1->ZB1_NUM, ZB1->ZB1_PARCEL, ZB1->ZB1_TIPO, ZB1->ZB1_CLIFOR, ZB1->ZB1_LOJA)
+        If nRec == 0
+            cErr := "titulo do documento " + cValToChar(Val(aIds[nI])) + " nao encontrado no " + IIf(lRec, "contas a receber", "contas a pagar")
+            Exit
+        EndIf
+        If SaldoTit(cTab, nRec) <= 0
+            cErr := "titulo do documento " + cValToChar(Val(aIds[nI])) + " sem saldo (baixado fora da integracao?)"
+            Exit
+        EndIf
+        lCred := (ZB1->ZB1_OPER == "E")
+        nRecO := 0
+        If lCred .And. lRec
+            nRecO := RecnoOriginal(ZB1->ZB1_IDTRAN, aIds)
+        EndIf
+        aAdd(aDocs, {nRec, lCred, nRecO})
+        aAdd(aRecId, aIds[nI])
+    Next nI
+
+    If Empty(cErr)
+        If lRec
+            SA1->(DbSetOrder(1))
+            SA1->(DbSeek(xFilial("SA1") + cCli + cLoja))
+            cCond := SA1->A1_COND
+            cCnpj := SA1->A1_CGC
+        Else
+            SA2->(DbSetOrder(1))
+            SA2->(DbSeek(xFilial("SA2") + cCli + cLoja))
+            cCond := SA2->A2_COND
+            cCnpj := SA2->A2_CGC
+        EndIf
+        If Empty(cCond)
+            cCond := U_tpgPar("MV_ZBCOND", "")
+        EndIf
+
+        Begin Transaction
+            cIdF := U_tpgSeq("ZB2", "ZB2_ID", cTab, cPref)
+            If lRec
+                aF := U_tpgFatRec(aDocs, cCli, cLoja, cPref, cIdF, cNat, cTipo, cCond, dDataBase)
+            Else
+                aF := U_tpgFatPag(aDocs, cCli, cLoja, cPref, cIdF, cNat, cTipo, cCond, dDataBase)
+            EndIf
+            If !aF[1]
+                cErr := aF[2]
+                DisarmTransaction()
+            Else
+                GravaZB2(cIdF, cOper, cHash, cCnpj, cCli, cLoja, cPref, cIdF, aF[5], cTipo, aF[4], dDataBase, Len(aRecId), ;
+                         IIf(lRec, aF[6], ""), cLog)
+                For nI := 1 To Len(aRecId)
+                    GravaZB3(cIdF, nI, aRecId[nI])
+                    ZB1->(DbSetOrder(1))
+                    If ZB1->(DbSeek(xFilial("ZB1") + aRecId[nI]))
+                        RecLock("ZB1", .F.)
+                            ZB1->ZB1_IDAGR  := cIdF
+                            ZB1->ZB1_STATUS := "2"
+                        ZB1->(MsUnlock())
+                    EndIf
+                Next nI
+            EndIf
+        End Transaction
+    EndIf
+
+    If !Empty(cErr)
+        oR["erro"] := cErr
+        Return {oR, .F.}
+    EndIf
+    oR["idFatura"] := Val(cIdF)
+    If !lMit
+        oR["valor"]      := aF[4]
+        oR["vencimento"] := DToC(VencTit(cTab, aF[3]))
+        oR["situacao"]   := "incluida"
+    EndIf
+Return {oR, .T.}
+
+// Recno, no SE1, do titulo a receber da transacao original de um estorno (se estiver no mesmo pedido)
+Static Function RecnoOriginal(cIdEst as Character, aIds as Array) as Numeric
+    Local nRet  := 0
+    Local aArea := ZB1->(GetArea())
+    Local cOri  := ""
+    ZB0->(DbSetOrder(1))
+    If ZB0->(DbSeek(xFilial("ZB0") + cIdEst)) .And. !Empty(ZB0->ZB0_TRORIG)
+        cOri := ZB0->ZB0_TRORIG
+        ZB1->(DbSetOrder(2))
+        If ZB1->(DbSeek(xFilial("ZB1") + cOri + "R")) .And. aScan(aIds, ZB1->ZB1_ID) > 0
+            nRet := RecnoTit("SE1", ZB1->ZB1_PREFIX, ZB1->ZB1_NUM, ZB1->ZB1_PARCEL, ZB1->ZB1_TIPO, ZB1->ZB1_CLIFOR, ZB1->ZB1_LOJA)
+        EndIf
+    EndIf
+    RestArea(aArea)
+Return nRet
+
+Static Function RecnoTit(cTab, cPref, cNum, cParc, cTipo, cCli, cLoja) as Numeric
+    Local nRet := 0
+    If cTab == "SE1"
+        SE1->(DbSetOrder(2))   // E1_FILIAL+E1_CLIENTE+E1_LOJA+E1_PREFIXO+E1_NUM+E1_PARCELA+E1_TIPO
+        If SE1->(DbSeek(xFilial("SE1") + cCli + cLoja + cPref + cNum + cParc + cTipo))
+            nRet := SE1->(Recno())
+        EndIf
+    Else
+        SE2->(DbSetOrder(1))   // E2_FILIAL+E2_PREFIXO+E2_NUM+E2_PARCELA+E2_TIPO+E2_FORNECE+E2_LOJA
+        If SE2->(DbSeek(xFilial("SE2") + cPref + cNum + cParc + cTipo + cCli + cLoja))
+            nRet := SE2->(Recno())
+        EndIf
+    EndIf
+Return nRet
+
+Static Function SaldoTit(cTab as Character, nRec as Numeric) as Numeric
+    If cTab == "SE1"
+        SE1->(DbGoTo(nRec))
+        Return SE1->E1_SALDO
+    EndIf
+    SE2->(DbGoTo(nRec))
+Return SE2->E2_SALDO
+
+Static Function VencTit(cTab as Character, nRec as Numeric) as Date
+    If cTab == "SE1"
+        SE1->(DbGoTo(nRec))
+        Return SE1->E1_VENCREA
+    EndIf
+    SE2->(DbGoTo(nRec))
+Return SE2->E2_VENCREA
+
+//-------------------------------------------------------------------------------------------------
+// API 06 / 07 - BaixaReceber / BaixaPagar: {"body":[{"nrCpfCnpj":"","dtPagamento":"dd/mm/aaaa","idsDocumentos":[...]}]}
+//-------------------------------------------------------------------------------------------------
+Static Function ApiBaixa(oIn, cLog as Character, cCart as Character) as Array
+    Local aItens := Lista(oIn["body"])
+    Local aOut   := {}
+    Local oOut   := JsonObject():New()
+    Local nI     := 0
+    Local nErr   := 0
+    Local aR     := {}
+    If Len(aItens) == 0
+        oOut["processos"] := {}
+        oOut["erro"] := "nenhuma baixa em body[]"
+        Return {400, oOut, 0, 0}
+    EndIf
+    For nI := 1 To Len(aItens)
+        aR := Baixa(aItens[nI], cLog, cCart)
+        aAdd(aOut, aR[1])
+        If !aR[2]
+            nErr++
+        EndIf
+    Next nI
+    oOut["processos"] := aOut
+Return {IIf(nErr > 0 .And. ModoMIT(), 400, 200), oOut, Len(aItens), nErr}
+
+Static Function Baixa(oB, cLog as Character, cCart as Character) as Array
+    Local oR     := JsonObject():New()
+    Local lMit   := ModoMIT()
+    Local lRec   := (cCart == "R")
+    Local cOper  := IIf(lRec, "BR", "BP")
+    Local cOpFat := IIf(lRec, "FR", "FP")
+    Local cTab   := IIf(lRec, "SE1", "SE2")
+    Local cCnpj  := ""
+    Local dPg    := CToD("")
+    Local aIds   := {}
+    Local aCad   := {}
+    Local cHash  := ""
+    Local cErr   := ""
+    Local nI     := 0
+    Local aRecs  := {}
+    Local nRec   := 0
+    Local cIdB   := ""
+    Local aBx    := {}
+    Local nTot   := 0
+    Local aBco   := U_tpgBanco(IIf(lRec, "MV_ZBBCOR", "MV_ZBBCOP"))
+    Local cMot   := U_tpgPar("MV_ZBMOTBX", "NOR")
+
+    If ValType(oB) != "J"
+        oR["erro"] := "item invalido"
+        Return {oR, .F.}
+    EndIf
+    cCnpj := U_tpgCnpj(oB["nrCpfCnpj"])
+    dPg   := U_tpgData(oB["dtPagamento"])
+    aIds  := U_tpgIds(oB["idsDocumentos"])
+    If !lMit
+        oR["idsDocumentos"] := IdsJson(aIds)
+    EndIf
+
+    Do Case
+        Case Empty(cCnpj)
+            cErr := "nrCpfCnpj nao informado"
+        Case Empty(dPg)
+            cErr := "dtPagamento invalida (esperado dd/mm/aaaa)"
+        Case dPg > Date()
+            cErr := "dtPagamento no futuro (" + DToC(dPg) + ")"
+        Case Len(aIds) == 0
+            cErr := "idsDocumentos vazio"
+        Case Empty(aBco[1])
+            cErr := "banco das baixas nao configurado (" + IIf(lRec, "MV_ZBBCOR", "MV_ZBBCOP") + ")"
+    EndCase
+    If Empty(cErr)
+        aCad := IIf(lRec, U_tpgCliente(cCnpj), U_tpgFornec(cCnpj))
+        If Empty(aCad[1])
+            cErr := aCad[3]
+        EndIf
+    EndIf
+    cHash := U_tpgHash(cOper + "|" + cCnpj + "|" + DToS(dPg) + "|" + U_tpgJunta(aIds, ","))
+
+    If Empty(cErr)
+        ZB2->(DbSetOrder(2))
+        If ZB2->(DbSeek(xFilial("ZB2") + cOper + PadR(cHash, TamSX3("ZB2_HASH")[1])))
+            oR["idProcesso"] := Val(ZB2->ZB2_ID)
+            If !lMit
+                oR["situacao"] := "ja recebida: devolvido o mesmo processo, nada baixado de novo"
+            EndIf
+            Return {oR, .T.}
+        EndIf
+    EndIf
+
+    If Empty(cErr)
+        For nI := 1 To Len(aIds)
+            If Left(aIds[nI], 1) == "#"
+                cErr := "id invalido: " + SubStr(aIds[nI], 2)
+                Exit
+            EndIf
+            ZB2->(DbSetOrder(1))
+            If !ZB2->(DbSeek(xFilial("ZB2") + aIds[nI])) .Or. ZB2->ZB2_OPER != cOpFat
+                cErr := "fatura " + cValToChar(Val(aIds[nI])) + " nao encontrada (nao foi devolvida pela API " + IIf(lRec, "03", "04") + ")"
+                Exit
+            EndIf
+            If ZB2->ZB2_CLIFOR + ZB2->ZB2_LOJA != aCad[1] + aCad[2]
+                cErr := "fatura " + cValToChar(Val(aIds[nI])) + " nao e do CNPJ " + cCnpj
+                Exit
+            EndIf
+            If !Empty(ZB2->ZB2_IDBX)
+                cErr := "fatura " + cValToChar(Val(aIds[nI])) + " ja baixada no processo " + cValToChar(Val(ZB2->ZB2_IDBX)) + ;
+                        " em " + DToC(DataBaixa(ZB2->ZB2_IDBX))
+                Exit
+            EndIf
+            nRec := RecnoTit(cTab, ZB2->ZB2_PREFIX, ZB2->ZB2_NUM, ZB2->ZB2_PARCEL, ZB2->ZB2_TIPO, ZB2->ZB2_CLIFOR, ZB2->ZB2_LOJA)
+            If nRec == 0 .Or. SaldoTit(cTab, nRec) <= 0
+                cErr := "fatura " + cValToChar(Val(aIds[nI])) + " sem saldo no " + IIf(lRec, "contas a receber", "contas a pagar")
+                Exit
+            EndIf
+            aAdd(aRecs, {aIds[nI], nRec, ZB2->(Recno())})
+        Next nI
+    EndIf
+
+    If Empty(cErr)
+        Begin Transaction
+            cIdB := U_tpgSeq("ZB2", "ZB2_ID", "", "")
+            For nI := 1 To Len(aRecs)
+                If lRec
+                    aBx := U_tpgBxRec(aRecs[nI][2], dPg, aBco, cMot, "TRUCKPAG PROCESSO " + cIdB)
+                Else
+                    aBx := U_tpgBxPag(aRecs[nI][2], dPg, aBco, cMot, "TRUCKPAG PROCESSO " + cIdB)
+                EndIf
+                If !aBx[1]
+                    cErr := "fatura " + cValToChar(Val(aRecs[nI][1])) + ": " + aBx[2]
+                    Exit
+                EndIf
+                nTot += aBx[3]
+            Next nI
+            If !Empty(cErr)
+                DisarmTransaction()
+            Else
+                GravaZB2(cIdB, cOper, cHash, cCnpj, aCad[1], aCad[2], "", "", "", "", nTot, dPg, Len(aRecs), "", cLog)
+                For nI := 1 To Len(aRecs)
+                    GravaZB3(cIdB, nI, aRecs[nI][1])
+                    ZB2->(DbGoTo(aRecs[nI][3]))
+                    RecLock("ZB2", .F.)
+                        ZB2->ZB2_IDBX := cIdB
+                    ZB2->(MsUnlock())
+                Next nI
+            EndIf
+        End Transaction
+    EndIf
+
+    If !Empty(cErr)
+        oR["erro"] := cErr
+        Return {oR, .F.}
+    EndIf
+    oR["idProcesso"] := Val(cIdB)
+    If !lMit
+        oR["valor"]    := nTot
+        oR["situacao"] := "baixado"
+    EndIf
+Return {oR, .T.}
+
+Static Function DataBaixa(cIdB as Character) as Date
+    Local dRet  := CToD("")
+    Local aArea := ZB2->(GetArea())
+    ZB2->(DbSetOrder(1))
+    If ZB2->(DbSeek(xFilial("ZB2") + cIdB))
+        dRet := ZB2->ZB2_DTREF
+    EndIf
+    RestArea(aArea)
+Return dRet
+
+//-------------------------------------------------------------------------------------------------
+// Gravacao do controle
+//-------------------------------------------------------------------------------------------------
+Static Function GravaZB0(cId, cOper, cNr, cBe, cPg, cMBe, cMPg, dEm, nRec, nPag, cIdR, cIdP, cIdOri, cTrOri, cHash, cLog)
+    RecLock("ZB0", .T.)
+        ZB0->ZB0_FILIAL := xFilial("ZB0")
+        ZB0->ZB0_IDTRAN := cId
+        ZB0->ZB0_OPER   := cOper
+        ZB0->ZB0_NRNF   := cNr
+        ZB0->ZB0_CNPJBE := cBe
+        ZB0->ZB0_CNPJPG := cPg
+        ZB0->ZB0_MUNBE  := cMBe
+        ZB0->ZB0_MUNPG  := cMPg
+        ZB0->ZB0_DTEMIS := dEm
+        ZB0->ZB0_VLREC  := nRec
+        ZB0->ZB0_VLPAG  := nPag
+        ZB0->ZB0_IDREC  := cIdR
+        ZB0->ZB0_IDPAG  := cIdP
+        ZB0->ZB0_IDORIG := cIdOri
+        ZB0->ZB0_TRORIG := cTrOri
+        ZB0->ZB0_HASH   := cHash
+        ZB0->ZB0_DTHR   := U_tpgDtHr()
+        ZB0->ZB0_LOG    := cLog
+    ZB0->(MsUnlock())
+Return Nil
+
+Static Function GravaZB1(cId, cCart, cIdT, cOper, cPref, cTipo, cCliFor, cLoja, nValor)
+    RecLock("ZB1", .T.)
+        ZB1->ZB1_FILIAL := xFilial("ZB1")
+        ZB1->ZB1_ID     := cId
+        ZB1->ZB1_CART   := cCart
+        ZB1->ZB1_IDTRAN := cIdT
+        ZB1->ZB1_OPER   := cOper
+        ZB1->ZB1_PREFIX := cPref
+        ZB1->ZB1_NUM    := cId
+        ZB1->ZB1_PARCEL := ""
+        ZB1->ZB1_TIPO   := cTipo
+        ZB1->ZB1_CLIFOR := cCliFor
+        ZB1->ZB1_LOJA   := cLoja
+        ZB1->ZB1_VALOR  := nValor
+        ZB1->ZB1_STATUS := "1"
+    ZB1->(MsUnlock())
+Return Nil
+
+Static Function GravaZB2(cId, cOper, cHash, cCnpj, cCliFor, cLoja, cPref, cNum, cParc, cTipo, nValor, dRef, nQtd, cNumLiq, cLog)
+    RecLock("ZB2", .T.)
+        ZB2->ZB2_FILIAL := xFilial("ZB2")
+        ZB2->ZB2_ID     := cId
+        ZB2->ZB2_OPER   := cOper
+        ZB2->ZB2_HASH   := cHash
+        ZB2->ZB2_CNPJ   := cCnpj
+        ZB2->ZB2_CLIFOR := cCliFor
+        ZB2->ZB2_LOJA   := cLoja
+        ZB2->ZB2_PREFIX := cPref
+        ZB2->ZB2_NUM    := cNum
+        ZB2->ZB2_PARCEL := cParc
+        ZB2->ZB2_TIPO   := cTipo
+        ZB2->ZB2_VALOR  := nValor
+        ZB2->ZB2_DTREF  := dRef
+        ZB2->ZB2_QTDOC  := nQtd
+        ZB2->ZB2_NUMLIQ := cNumLiq
+        ZB2->ZB2_DTHR   := U_tpgDtHr()
+        ZB2->ZB2_LOG    := cLog
+    ZB2->(MsUnlock())
+Return Nil
+
+Static Function GravaZB3(cId, nItem, cRef)
+    RecLock("ZB3", .T.)
+        ZB3->ZB3_FILIAL := xFilial("ZB3")
+        ZB3->ZB3_ID     := cId
+        ZB3->ZB3_ITEM   := StrZero(nItem, 4)
+        ZB3->ZB3_REF    := cRef
+    ZB3->(MsUnlock())
+Return Nil
+
+Static Function DtHrTxt(cDtHr as Character) as Character
+    If Len(AllTrim(cDtHr)) < 12
+        Return AllTrim(cDtHr)
+    EndIf
+Return SubStr(cDtHr, 7, 2) + "/" + SubStr(cDtHr, 5, 2) + "/" + Left(cDtHr, 4) + " " + SubStr(cDtHr, 9, 2) + ":" + SubStr(cDtHr, 11, 2)

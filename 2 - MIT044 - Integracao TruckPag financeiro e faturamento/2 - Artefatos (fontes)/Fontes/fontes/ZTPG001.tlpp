@@ -1,0 +1,443 @@
+#include "tlpp-core.th"
+#include "protheus.ch"
+
+namespace custom.transvale.truckpag
+
+/*/{Protheus.doc} ZTPG001
+TruckPag (MIT044) - pecas do financeiro, todas por rotina automatica do padrao:
+  tpgIncRec / tpgIncPag  titulo a receber/pagar (provisorio tipo comum ou NCC/NDF)   FINA040 / FINA050
+  tpgFatRec              fatura a receber: compensa NCC (MaIntBxCR caso 3) e liquida o resto (FINA460)
+  tpgFatPag              fatura a pagar, abatendo NDF                                 FINA290
+  tpgBxRec / tpgBxPag    baixa da fatura com movimento no banco                         FINA070 / FINA080
+Nada aqui depende de REST nem do formato do Sistema Gestao: o Cenario 1 (importacao por tela) usa as
+mesmas funcoes. Cada funcao devolve {lOk, cMensagem, ...} e NAO abre transacao propria: quem chama
+decide o tamanho da transacao (uma transacao por transacao/fatura/processo).
+Fato da base de teste (24/10/2026): a FINA280 recusa a rotina automatica (descontinuada desde 12.1.17,
+substituida pela FINA460), e a FINA460 sozinha nao abate a NCC; por isso a compensacao antes.
+@type function
+@author TOTVS (projeto TruckPag)
+@since 24/10/2026
+/*/
+
+/*/{Protheus.doc} tpgIncRec
+Inclui titulo a receber (FINA040). Devolve {lOk, cMsg, nRecno}.
+@type function
+/*/
+User Function tpgIncRec(cPref as Character, cNum as Character, cTipo as Character, cNat as Character, cCli as Character, ;
+                   cLoja as Character, dEmis as Date, dVenc as Date, nValor as Numeric, cHist as Character) as Array
+    Local aTit := {}
+    Local aRet := {.F., "", 0}
+
+    PRIVATE lMsErroAuto    := .F.
+    PRIVATE lMsHelpAuto    := .T.
+    PRIVATE lAutoErrNoFile := .T.
+
+    aAdd(aTit, {"E1_PREFIXO", PadR(cPref, TamSX3("E1_PREFIXO")[1]), Nil})
+    aAdd(aTit, {"E1_NUM"    , PadR(cNum , TamSX3("E1_NUM")[1])    , Nil})
+    aAdd(aTit, {"E1_PARCELA", Space(TamSX3("E1_PARCELA")[1])      , Nil})
+    aAdd(aTit, {"E1_TIPO"   , PadR(cTipo, TamSX3("E1_TIPO")[1])   , Nil})
+    aAdd(aTit, {"E1_NATUREZ", PadR(cNat , TamSX3("E1_NATUREZ")[1]), Nil})
+    aAdd(aTit, {"E1_CLIENTE", cCli , Nil})
+    aAdd(aTit, {"E1_LOJA"   , cLoja, Nil})
+    aAdd(aTit, {"E1_EMISSAO", dEmis, Nil})
+    aAdd(aTit, {"E1_VENCTO" , dVenc, Nil})
+    aAdd(aTit, {"E1_VALOR"  , nValor, Nil})
+    aAdd(aTit, {"E1_HIST"   , Left(cHist, TamSX3("E1_HIST")[1]), Nil})
+
+    MSExecAuto({|x, y| FINA040(x, y)}, aTit, 3)
+    If lMsErroAuto
+        aRet[2] := U_tpgErroAuto("FINA040 recusou o titulo a receber")
+        Return aRet
+    EndIf
+    SE1->(DbSetOrder(1))
+    If SE1->(DbSeek(xFilial("SE1") + aTit[1][2] + aTit[2][2] + aTit[3][2] + aTit[4][2]))
+        aRet := {.T., "", SE1->(Recno())}
+    Else
+        aRet[2] := "FINA040 nao reclamou, mas o titulo a receber nao foi encontrado depois de gravar"
+    EndIf
+Return aRet
+
+/*/{Protheus.doc} tpgIncPag
+Inclui titulo a pagar (FINA050). Devolve {lOk, cMsg, nRecno}.
+@type function
+/*/
+User Function tpgIncPag(cPref as Character, cNum as Character, cTipo as Character, cNat as Character, cForn as Character, ;
+                   cLoja as Character, dEmis as Date, dVenc as Date, nValor as Numeric, cHist as Character) as Array
+    Local aTit := {}
+    Local aRet := {.F., "", 0}
+
+    PRIVATE lMsErroAuto    := .F.
+    PRIVATE lMsHelpAuto    := .T.
+    PRIVATE lAutoErrNoFile := .T.
+
+    aAdd(aTit, {"E2_PREFIXO", PadR(cPref, TamSX3("E2_PREFIXO")[1]), Nil})
+    aAdd(aTit, {"E2_NUM"    , PadR(cNum , TamSX3("E2_NUM")[1])    , Nil})
+    aAdd(aTit, {"E2_PARCELA", Space(TamSX3("E2_PARCELA")[1])      , Nil})
+    aAdd(aTit, {"E2_TIPO"   , PadR(cTipo, TamSX3("E2_TIPO")[1])   , Nil})
+    aAdd(aTit, {"E2_NATUREZ", PadR(cNat , TamSX3("E2_NATUREZ")[1]), Nil})
+    aAdd(aTit, {"E2_FORNECE", cForn, Nil})
+    aAdd(aTit, {"E2_LOJA"   , cLoja, Nil})
+    aAdd(aTit, {"E2_EMISSAO", dEmis, Nil})
+    aAdd(aTit, {"E2_VENCTO" , dVenc, Nil})
+    aAdd(aTit, {"E2_VALOR"  , nValor, Nil})
+    aAdd(aTit, {"E2_HIST"   , Left(cHist, TamSX3("E2_HIST")[1]), Nil})
+
+    MSExecAuto({|x, y, z| FINA050(x, y, z)}, aTit, , 3)
+    If lMsErroAuto
+        aRet[2] := U_tpgErroAuto("FINA050 recusou o titulo a pagar")
+        Return aRet
+    EndIf
+    SE2->(DbSetOrder(1))
+    If SE2->(DbSeek(xFilial("SE2") + aTit[1][2] + aTit[2][2] + aTit[3][2] + aTit[4][2] + cForn + cLoja))
+        aRet := {.T., "", SE2->(Recno())}
+    Else
+        aRet[2] := "FINA050 nao reclamou, mas o titulo a pagar nao foi encontrado depois de gravar"
+    EndIf
+Return aRet
+
+/*/{Protheus.doc} tpgVencUnico
+Vencimento pela condicao de pagamento, exigindo parcela unica (proposta P-04). Devolve {lOk, cMsg, dVenc}.
+@type function
+/*/
+User Function tpgVencUnico(nValor as Numeric, cCond as Character, dData as Date) as Array
+    Local aVenc := {}
+    If Empty(cCond)
+        Return {.F., "sem condicao de pagamento no cadastro nem no parametro MV_ZBCOND", CToD("")}
+    EndIf
+    SE4->(DbSetOrder(1))
+    If !SE4->(DbSeek(xFilial("SE4") + PadR(cCond, TamSX3("E4_CODIGO")[1])))
+        Return {.F., "condicao de pagamento " + AllTrim(cCond) + " nao cadastrada", CToD("")}
+    EndIf
+    aVenc := Condicao(nValor, cCond, 0, dData)
+    If Len(aVenc) != 1
+        Return {.F., "condicao de pagamento " + AllTrim(cCond) + " gera " + cValToChar(Len(aVenc)) + ;
+                " parcelas; a fatura do TruckPag e de parcela unica (P-04)", CToD("")}
+    EndIf
+Return {.T., "", aVenc[1][1]}
+
+/*/{Protheus.doc} tpgFatRec
+Fatura a receber de um cliente.
+aDocs: {{nRecnoSE1, lCredito, cIdOriginal}} - lCredito = NCC; cIdOriginal = recno do titulo que a NCC estorna
+(a compensacao comeca por ele). Passo 1: cada NCC e compensada com os titulos do mesmo pedido (MaIntBxCR caso 3,
+"compensacao" da MIT, sem banco). Passo 2: os titulos com saldo sao liquidados num titulo so (FINA460), de parcela
+unica, vencimento pela condicao. Devolve {lOk, cMsg, nRecnoFatura, nValor, cParcela, cNumLiq}.
+@type function
+/*/
+User Function tpgFatRec(aDocs as Array, cCli as Character, cLoja as Character, cPref as Character, cNum as Character, ;
+                   cNat as Character, cTipo as Character, cCond as Character, dData as Date) as Array
+    Local aRet   := {.F., "", 0, 0, "", ""}
+    Local aDeb   := {}
+    Local aCred  := {}
+    Local nDeb   := 0
+    Local nCred  := 0
+    Local nTot   := 0
+    Local nI     := 0
+    Local nJ     := 0
+    Local nResto := 0
+    Local nVlr   := 0
+    Local aOrdem := {}
+    Local aVenc  := {}
+    Local aCab   := {}
+    Local aItens := {}
+    Local cQry   := ""
+    Local cRecs  := ""
+    Local lLiq   := .F.
+    Local cTmp   := ""
+    Local aPar   := {.F., .F., .F., .F., .F., .F.}
+
+    PRIVATE lMsErroAuto    := .F.
+    PRIVATE lMsHelpAuto    := .T.
+    PRIVATE lAutoErrNoFile := .T.
+
+    For nI := 1 To Len(aDocs)
+        SE1->(DbGoTo(aDocs[nI][1]))
+        If aDocs[nI][2]
+            aAdd(aCred, {aDocs[nI][1], SE1->E1_SALDO, aDocs[nI][3]})
+            nCred += SE1->E1_SALDO
+        Else
+            aAdd(aDeb, aDocs[nI][1])
+            nDeb += SE1->E1_SALDO
+        EndIf
+    Next nI
+    nTot := Round(nDeb - nCred, 2)
+    If nTot <= 0
+        aRet[2] := "a fatura daria " + AllTrim(Transform(nTot, "@E 999,999,999.99")) + ;
+                   ": creditos (estornos) maiores ou iguais as transacoes; nada foi faturado e os creditos seguem em aberto (P-15)"
+        Return aRet
+    EndIf
+    aVenc := U_tpgVencUnico(nTot, cCond, dData)
+    If !aVenc[1]
+        aRet[2] := aVenc[2]
+        Return aRet
+    EndIf
+
+    // Passo 1: compensa cada credito com os titulos do pedido, comecando pela transacao que ele estorna
+    For nI := 1 To Len(aCred)
+        nResto := aCred[nI][2]
+        aOrdem := {}
+        If aCred[nI][3] > 0 .And. aScan(aDeb, aCred[nI][3]) > 0
+            aAdd(aOrdem, aCred[nI][3])
+        EndIf
+        For nJ := 1 To Len(aDeb)
+            If aScan(aOrdem, aDeb[nJ]) == 0
+                aAdd(aOrdem, aDeb[nJ])
+            EndIf
+        Next nJ
+        For nJ := 1 To Len(aOrdem)
+            If nResto <= 0
+                Exit
+            EndIf
+            SE1->(DbGoTo(aOrdem[nJ]))
+            nVlr := Min(SE1->E1_SALDO, nResto)
+            If nVlr <= 0
+                Loop
+            EndIf
+            lMsErroAuto := .F.
+            If !MaIntBxCR(3, {aOrdem[nJ]}, Nil, {aCred[nI][1]}, Nil, aPar, Nil, Nil, Nil, Nil, nVlr, Nil, {nVlr}) .Or. lMsErroAuto
+                aRet[2] := "compensacao do credito (NCC) recusada: " + U_tpgErroAuto("MaIntBxCR")
+                Return aRet
+            EndIf
+            nResto := Round(nResto - nVlr, 2)
+        Next nJ
+        SE1->(DbGoTo(aCred[nI][1]))
+        If SE1->E1_SALDO > 0
+            aRet[2] := "o credito (NCC) " + AllTrim(SE1->E1_NUM) + " ficou com saldo " + cValToChar(SE1->E1_SALDO) + " depois da compensacao"
+            Return aRet
+        EndIf
+    Next nI
+
+    // Passo 2: liquida os titulos com saldo num titulo so (fatura)
+    For nI := 1 To Len(aDeb)
+        SE1->(DbGoTo(aDeb[nI]))
+        If SE1->E1_SALDO > 0
+            cRecs += IIf(Empty(cRecs), "", ",") + cValToChar(aDeb[nI])
+        EndIf
+    Next nI
+    cQry := "E1_FILIAL = '" + xFilial("SE1") + "' AND R_E_C_N_O_ IN (" + cRecs + ") AND E1_SALDO > 0 AND D_E_L_E_T_ = ' '"
+
+    aAdd(aCab, {"cCondicao", cCond , Nil})
+    aAdd(aCab, {"cNatureza", PadR(cNat, TamSX3("E1_NATUREZ")[1]), Nil})
+    aAdd(aCab, {"E1_TIPO"  , PadR(cTipo, TamSX3("E1_TIPO")[1]), Nil})
+    aAdd(aCab, {"cCliente" , cCli  , Nil})
+    aAdd(aCab, {"cLoja"    , cLoja , Nil})
+    aAdd(aCab, {"nMoeda"   , 1     , Nil})
+    aAdd(aItens, {{"E1_PREFIXO", PadR(cPref, TamSX3("E1_PREFIXO")[1]), Nil}, ;
+                  {"E1_NUM"    , PadR(cNum, TamSX3("E1_NUM")[1])     , Nil}, ;
+                  {"E1_VENCTO" , aVenc[3], Nil}, ;
+                  {"E1_VLCRUZ" , nTot    , Nil}, ;
+                  {"E1_ACRESC" , 0       , Nil}, ;
+                  {"E1_DECRESC", 0       , Nil}})
+    lMsErroAuto := .F.
+    lLiq := FINA460(Nil, aCab, aItens, 3, Nil, Nil, Nil, Nil, Nil, Nil, Nil, Nil, cQry)
+    If lMsErroAuto .Or. ValType(lLiq) != "L" .Or. !lLiq
+        aRet[2] := "liquidacao (FINA460) recusada: " + U_tpgErroAuto("FINA460")
+        Return aRet
+    EndIf
+
+    // Confere: fatura gravada com o total e nenhum titulo do pedido com saldo
+    cTmp := GetNextAlias()
+    MPSysOpenQuery("SELECT R_E_C_N_O_ REC FROM " + RetSqlName("SE1") + " WHERE E1_FILIAL = '" + xFilial("SE1") + "'" + ;
+                   " AND E1_PREFIXO = '" + PadR(cPref, TamSX3("E1_PREFIXO")[1]) + "' AND E1_NUM = '" + PadR(cNum, TamSX3("E1_NUM")[1]) + "'" + ;
+                   " AND E1_TIPO = '" + PadR(cTipo, TamSX3("E1_TIPO")[1]) + "' AND E1_CLIENTE = '" + cCli + "' AND D_E_L_E_T_ = ' '", cTmp)
+    If !(cTmp)->(Eof())
+        aRet[3] := (cTmp)->REC
+    EndIf
+    (cTmp)->(DbCloseArea())
+    If aRet[3] == 0
+        aRet[2] := "a liquidacao nao gerou o titulo da fatura " + AllTrim(cPref) + "-" + AllTrim(cNum)
+        Return aRet
+    EndIf
+    SE1->(DbGoTo(aRet[3]))
+    If Round(SE1->E1_VALOR, 2) != nTot
+        aRet[2] := "fatura gerada com " + cValToChar(SE1->E1_VALOR) + ", esperado " + cValToChar(nTot)
+        Return aRet
+    EndIf
+    aRet[4] := nTot
+    aRet[5] := SE1->E1_PARCELA
+    aRet[6] := SE1->E1_NUMLIQ
+    For nI := 1 To Len(aDocs)
+        SE1->(DbGoTo(aDocs[nI][1]))
+        If SE1->E1_SALDO > 0
+            aRet[2] := "o titulo " + AllTrim(SE1->E1_PREFIXO) + "-" + AllTrim(SE1->E1_NUM) + " ficou com saldo depois da fatura"
+            Return aRet
+        EndIf
+    Next nI
+    aRet[1] := .T.
+Return aRet
+
+/*/{Protheus.doc} tpgFatPag
+Fatura a pagar de um fornecedor (FINA290), abatendo as NDF.
+aDocs: {{nRecnoSE2, lDebito}}. Devolve {lOk, cMsg, nRecnoFatura, nValor, cParcela}.
+@type function
+/*/
+User Function tpgFatPag(aDocs as Array, cForn as Character, cLoja as Character, cPref as Character, cNum as Character, ;
+                   cNat as Character, cTipo as Character, cCond as Character, dData as Date) as Array
+    Local aRet  := {.F., "", 0, 0, ""}
+    Local aTits := {}
+    Local aFat  := {}
+    Local nDeb  := 0
+    Local nCred := 0
+    Local nTot  := 0
+    Local dDe   := dData
+    Local nI    := 0
+    Local aVenc := {}
+    Local cTmp  := ""
+
+    PRIVATE lMsErroAuto    := .F.
+    PRIVATE lMsHelpAuto    := .T.
+    PRIVATE lAutoErrNoFile := .T.
+
+    For nI := 1 To Len(aDocs)
+        SE2->(DbGoTo(aDocs[nI][1]))
+        If aDocs[nI][2]
+            nCred += SE2->E2_SALDO
+        Else
+            nDeb += SE2->E2_SALDO
+        EndIf
+        If SE2->E2_EMISSAO < dDe
+            dDe := SE2->E2_EMISSAO
+        EndIf
+        If SE2->E2_EMISSAO > dData
+            aRet[2] := "o titulo " + AllTrim(SE2->E2_NUM) + " tem emissao depois da data da fatura"
+            Return aRet
+        EndIf
+        aAdd(aTits, {SE2->E2_PREFIXO, SE2->E2_NUM, SE2->E2_PARCELA, SE2->E2_TIPO, .F., SE2->E2_FORNECE, SE2->E2_LOJA})
+    Next nI
+    nTot := Round(nDeb - nCred, 2)
+    If nTot <= 0
+        aRet[2] := "a fatura daria " + AllTrim(Transform(nTot, "@E 999,999,999.99")) + ;
+                   ": debitos (estornos) maiores ou iguais as transacoes; nada foi faturado e os debitos seguem em aberto (P-15)"
+        Return aRet
+    EndIf
+    aVenc := U_tpgVencUnico(nTot, cCond, dData)
+    If !aVenc[1]
+        aRet[2] := aVenc[2]
+        Return aRet
+    EndIf
+
+    aFat := {PadR(cPref, TamSX3("E2_PREFIXO")[1]), PadR(cTipo, TamSX3("E2_TIPO")[1]), PadR(cNum, TamSX3("E2_NUM")[1]), ;
+             PadR(cNat, TamSX3("E2_NATUREZ")[1]), dDe, dData, cForn, cLoja, cForn, cLoja, cCond, 1, aTits, 0, 0}
+    MSExecAuto({|x, y| FINA290(x, y)}, 3, aFat)
+    If lMsErroAuto
+        aRet[2] := "fatura a pagar (FINA290) recusada: " + U_tpgErroAuto("FINA290")
+        Return aRet
+    EndIf
+    For nI := 1 To Len(aTits)
+        If !aFat[13][nI][5]
+            aRet[2] := "a FINA290 nao localizou o titulo " + AllTrim(aTits[nI][2])
+            Return aRet
+        EndIf
+    Next nI
+
+    cTmp := GetNextAlias()
+    MPSysOpenQuery("SELECT R_E_C_N_O_ REC FROM " + RetSqlName("SE2") + " WHERE E2_FILIAL = '" + xFilial("SE2") + "'" + ;
+                   " AND E2_PREFIXO = '" + aFat[1] + "' AND E2_NUM = '" + aFat[3] + "' AND E2_TIPO = '" + aFat[2] + "'" + ;
+                   " AND E2_FORNECE = '" + cForn + "' AND E2_LOJA = '" + cLoja + "' AND D_E_L_E_T_ = ' '", cTmp)
+    If !(cTmp)->(Eof())
+        aRet[3] := (cTmp)->REC
+    EndIf
+    (cTmp)->(DbCloseArea())
+    If aRet[3] == 0
+        aRet[2] := "a FINA290 nao gerou o titulo da fatura " + AllTrim(cPref) + "-" + AllTrim(cNum)
+        Return aRet
+    EndIf
+    SE2->(DbGoTo(aRet[3]))
+    If Round(SE2->E2_VALOR, 2) != nTot
+        aRet[2] := "fatura gerada com " + cValToChar(SE2->E2_VALOR) + ", esperado " + cValToChar(nTot)
+        Return aRet
+    EndIf
+    aRet[4] := nTot
+    aRet[5] := SE2->E2_PARCELA
+    aRet[1] := .T.
+Return aRet
+
+/*/{Protheus.doc} tpgBxRec
+Baixa total de um titulo a receber (FINA070) com movimento no banco. Devolve {lOk, cMsg, nValor}.
+@type function
+/*/
+User Function tpgBxRec(nRecno as Numeric, dData as Date, aBco as Array, cMotivo as Character, cHist as Character) as Array
+    Local aBx   := {}
+    Local nSld  := 0
+    Local dBkp  := dDataBase
+
+    PRIVATE lMsErroAuto    := .F.
+    PRIVATE lMsHelpAuto    := .T.
+    PRIVATE lAutoErrNoFile := .T.
+
+    SE1->(DbGoTo(nRecno))
+    nSld := SE1->E1_SALDO
+    If nSld <= 0
+        Return {.F., "titulo sem saldo para baixar", 0}
+    EndIf
+    aAdd(aBx, {"E1_PREFIXO"  , SE1->E1_PREFIXO, Nil})
+    aAdd(aBx, {"E1_NUM"      , SE1->E1_NUM    , Nil})
+    aAdd(aBx, {"E1_PARCELA"  , SE1->E1_PARCELA, Nil})
+    aAdd(aBx, {"E1_TIPO"     , SE1->E1_TIPO   , Nil})
+    aAdd(aBx, {"E1_CLIENTE"  , SE1->E1_CLIENTE, Nil})
+    aAdd(aBx, {"E1_LOJA"     , SE1->E1_LOJA   , Nil})
+    aAdd(aBx, {"AUTMOTBX"    , cMotivo        , Nil})
+    aAdd(aBx, {"AUTBANCO"    , aBco[1]        , Nil})
+    aAdd(aBx, {"AUTAGENCIA"  , aBco[2]        , Nil})
+    aAdd(aBx, {"AUTCONTA"    , aBco[3]        , Nil})
+    aAdd(aBx, {"AUTDTBAIXA"  , dData          , Nil})
+    aAdd(aBx, {"AUTDTCREDITO", dData          , Nil})
+    aAdd(aBx, {"AUTHIST"     , Left(cHist, 40), Nil})
+    aAdd(aBx, {"AUTJUROS"    , 0              , Nil})
+    aAdd(aBx, {"AUTVALREC"   , nSld           , Nil})
+
+    dDataBase := dData
+    MSExecAuto({|x, y| FINA070(x, y)}, aBx, 3)
+    dDataBase := dBkp
+    If lMsErroAuto
+        Return {.F., "baixa a receber (FINA070) recusada: " + U_tpgErroAuto("FINA070"), 0}
+    EndIf
+    SE1->(DbGoTo(nRecno))
+    If SE1->E1_SALDO > 0
+        Return {.F., "a FINA070 nao reclamou, mas o titulo continua com saldo " + cValToChar(SE1->E1_SALDO), 0}
+    EndIf
+Return {.T., "", nSld}
+
+/*/{Protheus.doc} tpgBxPag
+Baixa total de um titulo a pagar (FINA080) com movimento no banco. Devolve {lOk, cMsg, nValor}.
+@type function
+/*/
+User Function tpgBxPag(nRecno as Numeric, dData as Date, aBco as Array, cMotivo as Character, cHist as Character) as Array
+    Local aBx   := {}
+    Local nSld  := 0
+    Local dBkp  := dDataBase
+
+    PRIVATE lMsErroAuto    := .F.
+    PRIVATE lMsHelpAuto    := .T.
+    PRIVATE lAutoErrNoFile := .T.
+
+    SE2->(DbGoTo(nRecno))
+    nSld := SE2->E2_SALDO
+    If nSld <= 0
+        Return {.F., "titulo sem saldo para baixar", 0}
+    EndIf
+    aAdd(aBx, {"E2_PREFIXO" , SE2->E2_PREFIXO, Nil})
+    aAdd(aBx, {"E2_NUM"     , SE2->E2_NUM    , Nil})
+    aAdd(aBx, {"E2_PARCELA" , SE2->E2_PARCELA, Nil})
+    aAdd(aBx, {"E2_TIPO"    , SE2->E2_TIPO   , Nil})
+    aAdd(aBx, {"E2_FORNECE" , SE2->E2_FORNECE, Nil})
+    aAdd(aBx, {"E2_LOJA"    , SE2->E2_LOJA   , Nil})
+    aAdd(aBx, {"AUTMOTBX"   , cMotivo        , Nil})
+    aAdd(aBx, {"AUTBANCO"   , aBco[1]        , Nil})
+    aAdd(aBx, {"AUTAGENCIA" , aBco[2]        , Nil})
+    aAdd(aBx, {"AUTCONTA"   , aBco[3]        , Nil})
+    aAdd(aBx, {"AUTDTBAIXA" , dData          , Nil})
+    aAdd(aBx, {"AUTDTDEB"   , dData          , Nil})
+    aAdd(aBx, {"AUTHIST"    , Left(cHist, 40), Nil})
+    aAdd(aBx, {"AUTVLRPG"   , nSld           , Nil})
+
+    dDataBase := dData
+    MSExecAuto({|x, y| FINA080(x, y)}, aBx, 3)
+    dDataBase := dBkp
+    If lMsErroAuto
+        Return {.F., "baixa a pagar (FINA080) recusada: " + U_tpgErroAuto("FINA080"), 0}
+    EndIf
+    SE2->(DbGoTo(nRecno))
+    If SE2->E2_SALDO > 0
+        Return {.F., "a FINA080 nao reclamou, mas o titulo continua com saldo " + cValToChar(SE2->E2_SALDO), 0}
+    EndIf
+Return {.T., "", nSld}

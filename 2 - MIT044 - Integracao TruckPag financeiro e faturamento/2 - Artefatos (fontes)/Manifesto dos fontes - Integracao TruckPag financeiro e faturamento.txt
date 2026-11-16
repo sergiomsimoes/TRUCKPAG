@@ -1,0 +1,31 @@
+Manifesto dos fontes - Integração TruckPag: financeiro e faturamento (MIT044, Cenário 2)
+Cliente: Guerra Implementos Rodoviários / TransVale (TFDRPC) - projeto TOTVS D0000083293
+SHA-256 calculado em 03/11/2026 sobre as cópias de Entrega\Fontes\ (cópia binária, sem conversão de encoding)
+Raiz: Entrega\Fontes\
+
+SHA-256                                                           bytes  arquivo                    vai-para-o-ambiente  encoding
+8202c371264e01fb58e4c04afd6797009c291b3c7c3004bc66d8e5798e46aa1e  10565  fontes\ZTPG002.tlpp        sim - controle (parâmetros, numeração ZB*, hash, CNPJ, trava, log)   ASCII
+415653a6c488c2ee367908461690c88ec4aac61c8c832e232c5f429723f35979  18157  fontes\ZTPG001.tlpp        sim - peças do financeiro (FINA040, FINA050, MaIntBxCR, FINA460, FINA290, FINA070, FINA080)   ASCII
+2427c424bccabf248781c8aa3a3233237fe97fb137ab62f8d57df7b1932ec674  36327  fontes\ZTPG010.tlpp        sim - serviços REST (APIs 01, 02, 03, 04, 06, 07)   ASCII
+20e6d3973baa75941744d28319ebe3b4b39d3f5ececac36e97e7ec066d9b9094 120580  dicionario\ATVTPG01.prw    sim - aplicador de dicionário U_ATVTPG01 (ZB0 a ZB4, 64 campos, 13 índices, 19 parâmetros MV_ZB*)   cp1252
+d12ee465f24aebac5edafd65252eb4cfe5139e777e541909dbb4652fa3179e3d    384  dicionario\ZTPGDIC.prw     opcional - atalho U_ZTPGDIC fixo na empresa 99 filial 01 (nossa base de teste); no ambiente do cliente usar U_ATVTPG01 ou ajustar a empresa/filial   ASCII
+ca3933550e66975617a8add326e3199090993cd1343b6597443f50afe64b3166  19938  dicionario\TVTPG01.json    referência - especificação do dicionário que gerou o aplicador; não se compila   UTF-8
+
+Não fazem parte da entrega (não compilar no ambiente do cliente):
+6668d7666137a4c2a9978b98192dd641294e7e703dbcd4b0087dadc3743a1c87  15697  testes\ZTPG900.tlpp        não - fonte só de teste (rota /transvale/truckpag/v1/lab)
+52e6e38e2df1e37d18c9a390aaea6e7952db46464270181e7e54d5b8f453dbbf   3658  testes\probe\ZTPG991.tlpp  não - sonda de desenvolvimento
+4486516fe81beb21f8c6c60cc4b0e5dfbf2becedcfb1e32cb48a97480dbfe8e3   6531  testes\probe\ZTPG992.tlpp  não - sonda de desenvolvimento
+62e2919cffa8bbc14876fa52e016658037683e09da78405e40bef85c61c4c360   7550  testes\probe\ZTPG993.tlpp  não - sonda de desenvolvimento
+aeda14633c7b25b4fd46dbb833208ffee3b848031fe1ae748e28983d9b728c8a   8176  testes\probe\ZTPG994.tlpp  não - sonda de desenvolvimento
+264840c6e586783d504a3d416dfa5211df9f135cf467055894892a2b665f47f1   8791  testes\probe\ZTPG995.tlpp  não - sonda de desenvolvimento
+
+Situação em 03/11/2026
+  Os seis arquivos da entrega são os mesmos usados nos testes de 24/10/2026 na nossa base de teste
+  (Protheus 12.1.2510, PostgreSQL, empresa 99): a última alteração deles é das 13:45 e os testes de
+  ponta a ponta começaram às 13:48. Em 03/11/2026 só mudaram linhas de comentário (autor e
+  anotações internas), sem nenhuma mudança de código; o código é o testado.
+  Ainda não foram compilados no ambiente da TransVale (sem acesso). Na instalação, conferir o SHA-256
+  de cada arquivo contra este manifesto antes de compilar.
+  Nomes provisórios: ZTPG*, ATVTPG01, ZTPGDIC, tabelas ZB0 a ZB4 e parâmetros MV_ZB* seguem a faixa
+  reservada usada na nossa base de teste; mudam quando o padrão de nomes do projeto for definido com a
+  TOTVS. Se mudarem, este manifesto e a GMUD são refeitos.

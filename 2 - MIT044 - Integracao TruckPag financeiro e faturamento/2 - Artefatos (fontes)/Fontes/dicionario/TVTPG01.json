@@ -1,0 +1,983 @@
+{
+ "numero": "TVTPG01",
+ "sx2": [
+  {
+   "alias": "ZB0",
+   "nome": "TruckPag transacoes",
+   "modo": "E",
+   "unico": "ZB0_FILIAL+ZB0_IDTRAN"
+  },
+  {
+   "alias": "ZB1",
+   "nome": "TruckPag titulos integracao",
+   "modo": "E",
+   "unico": "ZB1_FILIAL+ZB1_ID"
+  },
+  {
+   "alias": "ZB2",
+   "nome": "TruckPag faturas e baixas",
+   "modo": "E",
+   "unico": "ZB2_FILIAL+ZB2_ID"
+  },
+  {
+   "alias": "ZB3",
+   "nome": "TruckPag itens fatura/baixa",
+   "modo": "E",
+   "unico": "ZB3_FILIAL+ZB3_ID+ZB3_ITEM"
+  },
+  {
+   "alias": "ZB4",
+   "nome": "TruckPag log das chamadas",
+   "modo": "E",
+   "unico": "ZB4_FILIAL+ZB4_ID"
+  }
+ ],
+ "sx3": [
+  {
+   "alias": "ZB0",
+   "ordem": "01",
+   "campo": "ZB0_FILIAL",
+   "tipo": "C",
+   "tamanho": 2,
+   "titulo": "Filial",
+   "descric": "Filial do sistema",
+   "grpsxg": "033",
+   "browse": "N"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "02",
+   "campo": "ZB0_IDTRAN",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "Id transacao",
+   "descric": "Id da transacao (idEstorno no estorno)",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "03",
+   "campo": "ZB0_OPER",
+   "tipo": "C",
+   "tamanho": 1,
+   "titulo": "Operacao",
+   "descric": "I=inclusao API 01, E=estorno API 02",
+   "browse": "S",
+   "cbox": "I=Inclusao;E=Estorno",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "04",
+   "campo": "ZB0_NRNF",
+   "tipo": "C",
+   "tamanho": 20,
+   "titulo": "nrNfFornec",
+   "descric": "Id da transacao no Sistema Gestao",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "05",
+   "campo": "ZB0_CNPJBE",
+   "tipo": "C",
+   "tamanho": 14,
+   "titulo": "CNPJ benefic.",
+   "descric": "CNPJ do beneficiario",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "06",
+   "campo": "ZB0_CNPJPG",
+   "tipo": "C",
+   "tamanho": 14,
+   "titulo": "CNPJ pagador",
+   "descric": "CNPJ do pagador",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "07",
+   "campo": "ZB0_MUNBE",
+   "tipo": "C",
+   "tamanho": 7,
+   "titulo": "Mun. benefic.",
+   "descric": "IBGE do municipio do beneficiario",
+   "browse": "N",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "08",
+   "campo": "ZB0_MUNPG",
+   "tipo": "C",
+   "tamanho": 7,
+   "titulo": "Mun. pagador",
+   "descric": "IBGE do municipio do pagador",
+   "browse": "N",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "09",
+   "campo": "ZB0_DTEMIS",
+   "tipo": "D",
+   "tamanho": 8,
+   "titulo": "Data transac.",
+   "descric": "Data da transacao (dtEmissaoFornec)",
+   "browse": "S"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "10",
+   "campo": "ZB0_VLREC",
+   "tipo": "N",
+   "tamanho": 16,
+   "titulo": "Vl recebido",
+   "descric": "Valor a receber do transportador",
+   "browse": "S",
+   "decimal": 2,
+   "picture": "@E 99,999,999,999.99"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "11",
+   "campo": "ZB0_VLPAG",
+   "tipo": "N",
+   "tamanho": 16,
+   "titulo": "Vl pago",
+   "descric": "Valor a pagar ao posto",
+   "browse": "S",
+   "decimal": 2,
+   "picture": "@E 99,999,999,999.99"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "12",
+   "campo": "ZB0_IDREC",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "idRecebimento",
+   "descric": "Id da perna a receber (ZB1)",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "13",
+   "campo": "ZB0_IDPAG",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "idPagamento",
+   "descric": "Id da perna a pagar (ZB1)",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "14",
+   "campo": "ZB0_IDORIG",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "idNotaFiscal",
+   "descric": "Estorno: idPagamento da original",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "15",
+   "campo": "ZB0_TRORIG",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "Transac. orig.",
+   "descric": "Estorno: id da transacao original",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "16",
+   "campo": "ZB0_HASH",
+   "tipo": "C",
+   "tamanho": 32,
+   "titulo": "Hash",
+   "descric": "Hash MD5 do conteudo enviado",
+   "browse": "N",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "17",
+   "campo": "ZB0_DTHR",
+   "tipo": "C",
+   "tamanho": 14,
+   "titulo": "Data/hora",
+   "descric": "Data e hora (AAAAMMDDHHMMSS)",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "18",
+   "campo": "ZB0_LOG",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "Id chamada",
+   "descric": "Id da chamada no log (ZB4)",
+   "browse": "N",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "01",
+   "campo": "ZB1_FILIAL",
+   "tipo": "C",
+   "tamanho": 2,
+   "titulo": "Filial",
+   "descric": "Filial do sistema",
+   "grpsxg": "033",
+   "browse": "N"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "02",
+   "campo": "ZB1_ID",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "Id titulo",
+   "descric": "idRecebimento/idPagamento devolvido",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "03",
+   "campo": "ZB1_CART",
+   "tipo": "C",
+   "tamanho": 1,
+   "titulo": "Carteira",
+   "descric": "R=receber, P=pagar",
+   "browse": "S",
+   "cbox": "R=Receber;P=Pagar",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "04",
+   "campo": "ZB1_IDTRAN",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "Id transacao",
+   "descric": "Transacao de origem (ZB0)",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "05",
+   "campo": "ZB1_OPER",
+   "tipo": "C",
+   "tamanho": 1,
+   "titulo": "Operacao",
+   "descric": "I=inclusao, E=estorno",
+   "browse": "S",
+   "cbox": "I=Inclusao;E=Estorno",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "06",
+   "campo": "ZB1_PREFIX",
+   "tipo": "C",
+   "tamanho": 3,
+   "titulo": "Prefixo",
+   "descric": "Prefixo do titulo",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "07",
+   "campo": "ZB1_NUM",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "Numero",
+   "descric": "Numero do titulo",
+   "browse": "S",
+   "grpsxg": "018",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "08",
+   "campo": "ZB1_PARCEL",
+   "tipo": "C",
+   "tamanho": 2,
+   "titulo": "Parcela",
+   "descric": "Parcela do titulo",
+   "browse": "S",
+   "grpsxg": "011",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "09",
+   "campo": "ZB1_TIPO",
+   "tipo": "C",
+   "tamanho": 3,
+   "titulo": "Tipo",
+   "descric": "Tipo do titulo",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "10",
+   "campo": "ZB1_CLIFOR",
+   "tipo": "C",
+   "tamanho": 6,
+   "titulo": "Cli/Fornec",
+   "descric": "Cliente ou fornecedor",
+   "browse": "S",
+   "grpsxg": "001",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "11",
+   "campo": "ZB1_LOJA",
+   "tipo": "C",
+   "tamanho": 2,
+   "titulo": "Loja",
+   "descric": "Loja",
+   "browse": "S",
+   "grpsxg": "002",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "12",
+   "campo": "ZB1_VALOR",
+   "tipo": "N",
+   "tamanho": 16,
+   "titulo": "Valor",
+   "descric": "Valor do titulo",
+   "browse": "S",
+   "decimal": 2,
+   "picture": "@E 99,999,999,999.99"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "13",
+   "campo": "ZB1_IDAGR",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "Id fatura",
+   "descric": "Fatura que agrupou o titulo (ZB2)",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "14",
+   "campo": "ZB1_STATUS",
+   "tipo": "C",
+   "tamanho": 1,
+   "titulo": "Situacao",
+   "descric": "1=em aberto, 2=em fatura",
+   "browse": "S",
+   "cbox": "1=Em aberto;2=Em fatura",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "01",
+   "campo": "ZB2_FILIAL",
+   "tipo": "C",
+   "tamanho": 2,
+   "titulo": "Filial",
+   "descric": "Filial do sistema",
+   "grpsxg": "033",
+   "browse": "N"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "02",
+   "campo": "ZB2_ID",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "Id",
+   "descric": "idFatura ou idProcesso devolvido",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "03",
+   "campo": "ZB2_OPER",
+   "tipo": "C",
+   "tamanho": 2,
+   "titulo": "Operacao",
+   "descric": "FR/FP fatura, BR/BP baixa",
+   "browse": "S",
+   "cbox": "FR=Fatura receber;FP=Fatura pagar;BR=Baixa receber;BP=Baixa pagar",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "04",
+   "campo": "ZB2_HASH",
+   "tipo": "C",
+   "tamanho": 32,
+   "titulo": "Hash",
+   "descric": "Hash do pedido (idempotencia)",
+   "browse": "N",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "05",
+   "campo": "ZB2_CNPJ",
+   "tipo": "C",
+   "tamanho": 14,
+   "titulo": "CNPJ",
+   "descric": "CNPJ do cliente ou fornecedor",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "06",
+   "campo": "ZB2_CLIFOR",
+   "tipo": "C",
+   "tamanho": 6,
+   "titulo": "Cli/Fornec",
+   "descric": "Cliente ou fornecedor",
+   "browse": "S",
+   "grpsxg": "001",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "07",
+   "campo": "ZB2_LOJA",
+   "tipo": "C",
+   "tamanho": 2,
+   "titulo": "Loja",
+   "descric": "Loja",
+   "browse": "S",
+   "grpsxg": "002",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "08",
+   "campo": "ZB2_PREFIX",
+   "tipo": "C",
+   "tamanho": 3,
+   "titulo": "Prefixo",
+   "descric": "Prefixo da fatura",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "09",
+   "campo": "ZB2_NUM",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "Numero",
+   "descric": "Numero da fatura",
+   "browse": "S",
+   "grpsxg": "018",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "10",
+   "campo": "ZB2_PARCEL",
+   "tipo": "C",
+   "tamanho": 2,
+   "titulo": "Parcela",
+   "descric": "Parcela da fatura",
+   "browse": "S",
+   "grpsxg": "011",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "11",
+   "campo": "ZB2_TIPO",
+   "tipo": "C",
+   "tamanho": 3,
+   "titulo": "Tipo",
+   "descric": "Tipo da fatura",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "12",
+   "campo": "ZB2_VALOR",
+   "tipo": "N",
+   "tamanho": 16,
+   "titulo": "Valor",
+   "descric": "Valor da fatura ou da baixa",
+   "browse": "S",
+   "decimal": 2,
+   "picture": "@E 99,999,999,999.99"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "13",
+   "campo": "ZB2_DTREF",
+   "tipo": "D",
+   "tamanho": 8,
+   "titulo": "Data",
+   "descric": "Data da fatura ou do pagamento",
+   "browse": "S"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "14",
+   "campo": "ZB2_QTDOC",
+   "tipo": "N",
+   "tamanho": 6,
+   "titulo": "Qtd docs",
+   "descric": "Quantidade de documentos",
+   "browse": "S",
+   "picture": "@E 999999"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "15",
+   "campo": "ZB2_IDBX",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "Id baixa",
+   "descric": "Fatura: processo que a baixou",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "16",
+   "campo": "ZB2_NUMLIQ",
+   "tipo": "C",
+   "tamanho": 6,
+   "titulo": "Liquidacao",
+   "descric": "Liquidacao da fatura a receber",
+   "browse": "S",
+   "grpsxg": "158",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "17",
+   "campo": "ZB2_DTHR",
+   "tipo": "C",
+   "tamanho": 14,
+   "titulo": "Data/hora",
+   "descric": "Data e hora do registro",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "18",
+   "campo": "ZB2_LOG",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "Id chamada",
+   "descric": "Id da chamada no log (ZB4)",
+   "browse": "N",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB3",
+   "ordem": "01",
+   "campo": "ZB3_FILIAL",
+   "tipo": "C",
+   "tamanho": 2,
+   "titulo": "Filial",
+   "descric": "Filial do sistema",
+   "grpsxg": "033",
+   "browse": "N"
+  },
+  {
+   "alias": "ZB3",
+   "ordem": "02",
+   "campo": "ZB3_ID",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "Id",
+   "descric": "Fatura ou processo (ZB2)",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB3",
+   "ordem": "03",
+   "campo": "ZB3_ITEM",
+   "tipo": "C",
+   "tamanho": 4,
+   "titulo": "Item",
+   "descric": "Item",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB3",
+   "ordem": "04",
+   "campo": "ZB3_REF",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "Documento",
+   "descric": "Titulo (ZB1) ou fatura (ZB2)",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB4",
+   "ordem": "01",
+   "campo": "ZB4_FILIAL",
+   "tipo": "C",
+   "tamanho": 2,
+   "titulo": "Filial",
+   "descric": "Filial do sistema",
+   "grpsxg": "033",
+   "browse": "N"
+  },
+  {
+   "alias": "ZB4",
+   "ordem": "02",
+   "campo": "ZB4_ID",
+   "tipo": "C",
+   "tamanho": 9,
+   "titulo": "Id",
+   "descric": "Id da chamada",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB4",
+   "ordem": "03",
+   "campo": "ZB4_API",
+   "tipo": "C",
+   "tamanho": 2,
+   "titulo": "API",
+   "descric": "Numero da API (01 a 08)",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB4",
+   "ordem": "04",
+   "campo": "ZB4_DTHR",
+   "tipo": "C",
+   "tamanho": 14,
+   "titulo": "Data/hora",
+   "descric": "Data e hora da chamada",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB4",
+   "ordem": "05",
+   "campo": "ZB4_USER",
+   "tipo": "C",
+   "tamanho": 25,
+   "titulo": "Usuario",
+   "descric": "Usuario da chamada",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB4",
+   "ordem": "06",
+   "campo": "ZB4_HTTP",
+   "tipo": "C",
+   "tamanho": 3,
+   "titulo": "HTTP",
+   "descric": "Codigo HTTP devolvido",
+   "browse": "S",
+   "picture": "@!"
+  },
+  {
+   "alias": "ZB4",
+   "ordem": "07",
+   "campo": "ZB4_QTD",
+   "tipo": "N",
+   "tamanho": 6,
+   "titulo": "Itens",
+   "descric": "Itens recebidos",
+   "browse": "S",
+   "picture": "@E 999999"
+  },
+  {
+   "alias": "ZB4",
+   "ordem": "08",
+   "campo": "ZB4_QTDERR",
+   "tipo": "N",
+   "tamanho": 6,
+   "titulo": "Com erro",
+   "descric": "Itens com erro",
+   "browse": "S",
+   "picture": "@E 999999"
+  },
+  {
+   "alias": "ZB4",
+   "ordem": "09",
+   "campo": "ZB4_BODY",
+   "tipo": "M",
+   "tamanho": 10,
+   "titulo": "Pedido",
+   "descric": "Corpo recebido",
+   "browse": "N"
+  },
+  {
+   "alias": "ZB4",
+   "ordem": "10",
+   "campo": "ZB4_RESP",
+   "tipo": "M",
+   "tamanho": 10,
+   "titulo": "Resposta",
+   "descric": "Corpo devolvido",
+   "browse": "N"
+  }
+ ],
+ "six": [
+  {
+   "alias": "ZB0",
+   "ordem": "1",
+   "chave": "ZB0_FILIAL+ZB0_IDTRAN",
+   "descricao": "Id transacao",
+   "showpesq": "S"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "2",
+   "chave": "ZB0_FILIAL+ZB0_OPER+ZB0_NRNF",
+   "descricao": "Operacao + nrNfFornec",
+   "showpesq": "S"
+  },
+  {
+   "alias": "ZB0",
+   "ordem": "3",
+   "chave": "ZB0_FILIAL+ZB0_TRORIG",
+   "descricao": "Transacao original",
+   "showpesq": "S"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "1",
+   "chave": "ZB1_FILIAL+ZB1_ID",
+   "descricao": "Id titulo",
+   "showpesq": "S"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "2",
+   "chave": "ZB1_FILIAL+ZB1_IDTRAN+ZB1_CART",
+   "descricao": "Transacao + carteira",
+   "showpesq": "S"
+  },
+  {
+   "alias": "ZB1",
+   "ordem": "3",
+   "chave": "ZB1_FILIAL+ZB1_IDAGR",
+   "descricao": "Fatura",
+   "showpesq": "S"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "1",
+   "chave": "ZB2_FILIAL+ZB2_ID",
+   "descricao": "Id",
+   "showpesq": "S"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "2",
+   "chave": "ZB2_FILIAL+ZB2_OPER+ZB2_HASH",
+   "descricao": "Operacao + hash",
+   "showpesq": "S"
+  },
+  {
+   "alias": "ZB2",
+   "ordem": "3",
+   "chave": "ZB2_FILIAL+ZB2_IDBX",
+   "descricao": "Processo de baixa",
+   "showpesq": "S"
+  },
+  {
+   "alias": "ZB3",
+   "ordem": "1",
+   "chave": "ZB3_FILIAL+ZB3_ID+ZB3_ITEM",
+   "descricao": "Id + item",
+   "showpesq": "S"
+  },
+  {
+   "alias": "ZB3",
+   "ordem": "2",
+   "chave": "ZB3_FILIAL+ZB3_REF+ZB3_ID",
+   "descricao": "Documento",
+   "showpesq": "S"
+  },
+  {
+   "alias": "ZB4",
+   "ordem": "1",
+   "chave": "ZB4_FILIAL+ZB4_ID",
+   "descricao": "Id chamada",
+   "showpesq": "S"
+  },
+  {
+   "alias": "ZB4",
+   "ordem": "2",
+   "chave": "ZB4_FILIAL+ZB4_API+ZB4_DTHR",
+   "descricao": "API + data/hora",
+   "showpesq": "S"
+  }
+ ],
+ "sx6": [
+  {
+   "var": "MV_ZBPREFR",
+   "tipo": "C",
+   "descric": "TruckPag: prefixo titulos a receber",
+   "desc1": "",
+   "conteudo": "TPG"
+  },
+  {
+   "var": "MV_ZBPREFP",
+   "tipo": "C",
+   "descric": "TruckPag: prefixo titulos a pagar",
+   "desc1": "",
+   "conteudo": "TPG"
+  },
+  {
+   "var": "MV_ZBTIPOR",
+   "tipo": "C",
+   "descric": "TruckPag: tipo provisorio a receber",
+   "desc1": "",
+   "conteudo": "DP"
+  },
+  {
+   "var": "MV_ZBTIPOP",
+   "tipo": "C",
+   "descric": "TruckPag: tipo provisorio a pagar",
+   "desc1": "",
+   "conteudo": "DP"
+  },
+  {
+   "var": "MV_ZBNATRP",
+   "tipo": "C",
+   "descric": "TruckPag: natureza provisorio a receber",
+   "desc1": "",
+   "conteudo": "TPGPRVREC"
+  },
+  {
+   "var": "MV_ZBNATPP",
+   "tipo": "C",
+   "descric": "TruckPag: natureza provisorio a pagar",
+   "desc1": "",
+   "conteudo": "TPGPRVPAG"
+  },
+  {
+   "var": "MV_ZBNATFR",
+   "tipo": "C",
+   "descric": "TruckPag: natureza fatura a receber",
+   "desc1": "",
+   "conteudo": "TPGFATREC"
+  },
+  {
+   "var": "MV_ZBNATFP",
+   "tipo": "C",
+   "descric": "TruckPag: natureza fatura a pagar",
+   "desc1": "",
+   "conteudo": "TPGFATPAG"
+  },
+  {
+   "var": "MV_ZBPRFFR",
+   "tipo": "C",
+   "descric": "TruckPag: prefixo fatura a receber",
+   "desc1": "",
+   "conteudo": "TPF"
+  },
+  {
+   "var": "MV_ZBPRFFP",
+   "tipo": "C",
+   "descric": "TruckPag: prefixo fatura a pagar",
+   "desc1": "",
+   "conteudo": "TPF"
+  },
+  {
+   "var": "MV_ZBTIPFT",
+   "tipo": "C",
+   "descric": "TruckPag: tipo do titulo da fatura",
+   "desc1": "",
+   "conteudo": "FT"
+  },
+  {
+   "var": "MV_ZBCOND",
+   "tipo": "C",
+   "descric": "TruckPag: condicao fatura (sem cadastro)",
+   "desc1": "Precisa ser de parcela unica (P-04)",
+   "conteudo": "TPG"
+  },
+  {
+   "var": "MV_ZBBCOR",
+   "tipo": "C",
+   "descric": "TruckPag: banco/ag/conta baixa a receber",
+   "desc1": "Separados por barra (P-05)",
+   "conteudo": "001/00000/00000001"
+  },
+  {
+   "var": "MV_ZBBCOP",
+   "tipo": "C",
+   "descric": "TruckPag: banco/ag/conta baixa a pagar",
+   "desc1": "Separados por barra (P-05)",
+   "conteudo": "001/00000/00000001"
+  },
+  {
+   "var": "MV_ZBMOTBX",
+   "tipo": "C",
+   "descric": "TruckPag: motivo da baixa das faturas",
+   "desc1": "",
+   "conteudo": "NOR"
+  },
+  {
+   "var": "MV_ZBRETOR",
+   "tipo": "C",
+   "descric": "TruckPag: retorno 1=item a item 2=MIT",
+   "desc1": "1=HTTP 200 e eco nrNfFornec (P-06)",
+   "conteudo": "1"
+  },
+  {
+   "var": "MV_ZBIDEMP",
+   "tipo": "L",
+   "descric": "TruckPag: nrNfFornec chave anti-duplicar",
+   "desc1": "Reenvio igual = mesmos ids; outro recusa",
+   "conteudo": ".T."
+  },
+  {
+   "var": "MV_ZBLOTE",
+   "tipo": "N",
+   "descric": "TruckPag: max. transacoes por chamada",
+   "desc1": "",
+   "conteudo": "1000"
+  },
+  {
+   "var": "MV_ZBFIL",
+   "tipo": "C",
+   "descric": "TruckPag: filial (vazio = da chamada)",
+   "desc1": "P-03",
+   "conteudo": ""
+  }
+ ]
+}
