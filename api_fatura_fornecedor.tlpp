@@ -1,0 +1,353 @@
+#Include 'Protheus.ch'
+#Include 'TopConn.ch'
+#Include 'tlpp-core.th'
+#Include 'tlpp-rest.th'
+
+/*/{Protheus.doc} API_fatura_fornecedor
+	API 04 - FecharFaturaFornecedor: substitui os PR a pagar por uma fatura definitiva do fornecedor.
+	Endpoint: POST /financeiro/fatura_fornecedor (função U_API_fatura_fornecedor), envelope {"body": [ ... ]}.
+
+	Compilar junto: api_infra.tlpp (ambiente, LOG ZGL e funções comuns) e SchemaJSON.tlpp (U_xApiVld).
+	Fluxo da requisição: ambiente -> LOG de início -> JSON -> Schema -> processamento -> LOG de término.
+	Parâmetros (SX6) utilizados:
+	MV_XTPPROV  Tipo do título provisório (default PR)
+	MV_XPFXFAT  Prefixo da fatura definitiva (default FAT)
+	MV_XTPFATP  Tipo da fatura a pagar (default FT)
+	MV_XNATFTP  Natureza da fatura a pagar (obrigatório)
+
+	@type user function
+	@author Leandro Massafera
+	@since 05/11/2026
+	@version 1.0
+/*/
+
+// 05/11/2026 - Leandro Massafera - Fonte individual desta API (separado do antigo api_financeiro)
+
+//=====================================================================================================
+// API 04 - FecharFaturaFornecedor
+// Substitui os títulos provisórios informados por UM título definitivo (fatura) do mesmo cliente
+// (ou fornecedor), com valor igual à soma dos saldos dos PR.
+// Atributo NOVO em relação à spec: dtVencimento (dd/mm/aaaa) - vencimento da fatura definitiva.
+//=====================================================================================================
+@Post("/financeiro/fatura_fornecedor")
+Function U_API_fatura_fornecedor()
+	fFatura("SE2")
+Return .T.
+
+Static Function fFatura(cTab)
+
+	Local cJSON      := oRest:GetBodyRequest()
+	Local oObj       := Nil
+	Local oRet       := JsonObject():New()
+	Local oFat       := Nil
+	Local aBody      := {}
+	Local aFaturas   := {}
+	Local aDocs      := {}
+	Local nI         := 0
+	Local lErroGeral := .F.
+	Local cErro      := ""
+	Local cIdFat     := ""
+	Local aCtx       := {}
+	Local nOk        := 0
+	Local nErr       := 0
+
+	Private lMsErroAuto    := .F.
+	Private lMsHelpAuto    := .T.
+	Private lAutoErrNoFile := .T.
+
+	If !U_xApiAbre(IIf(cTab == "SE1", "fatura_cliente", "fatura_fornecedor"), fSchema(), cJSON, @aCtx, @oObj, @aBody)
+		Return .T.
+	EndIf
+
+	For nI := 1 To Len(aBody)
+		cIdFat := ""
+		cErro  := ""
+		aDocs  := {}
+		oFat   := JsonObject():New()
+
+		If ValType(aBody[nI]) <> "J"
+			cErro := "Item inválido."
+		Else
+			fFaturaItem(aBody[nI], cTab, @cIdFat, @aDocs, @cErro)
+		EndIf
+
+		If Empty(cErro) .And. !Empty(cIdFat)
+			nOk++
+			oFat["idFatura"]   := cIdFat
+			oFat["documentos"] := aDocs
+		Else
+			nErr++
+			lErroGeral := .T.
+			oFat["erro"]       := cErro
+			oFat["documentos"] := aDocs
+			ConOut("API_FINANCEIRO -> fatura " + cTab + " ERRO: " + cErro)
+		EndIf
+		aAdd(aFaturas, oFat)
+	Next nI
+
+	oRet["faturas"] := aFaturas
+
+	U_xApiResp(aCtx, IIf(lErroGeral, 400, 200), oRet:ToJson(), IIf(lErroGeral, cValToChar(nErr) + " fatura(s) com erro.", ""), nOk + nErr, nOk, nErr)
+
+	FreeObj(oRet)
+	FreeObj(oObj)
+
+Return .T.
+
+//-----------------------------------------------------------------------------------------------------
+// Fecha uma fatura (um item do body das APIs 03/04)
+//-----------------------------------------------------------------------------------------------------
+Static Function fFaturaItem(oItem, cTab, cIdFat, aDocs, cErro)
+
+	Local cAttrIds  := IIf(cTab == "SE1", "idsRecebimento", "idsPagamento")
+	Local cPfx      := IIf(cTab == "SE1", "E1_", "E2_")
+	Local cCampoCF  := IIf(cTab == "SE1", "CLIENTE", "FORNECE")
+	Local aIdsJson  := {}
+	Local aRecs     := {}
+	Local aCab      := {}
+	Local dVenc     := CToD("")
+	Local cTipoPR   := PadR(SuperGetMV("MV_XTPPROV", .F., "PR"), TamSX3(cPfx + "TIPO")[1])
+	Local cPrefixo  := PadR(SuperGetMV("MV_XPFXFAT", .F., "FAT"), TamSX3(cPfx + "PREFIXO")[1])
+	Local cTipoFat  := PadR(SuperGetMV(IIf(cTab == "SE1", "MV_XTPFATR", "MV_XTPFATP"), .F., "FT"), TamSX3(cPfx + "TIPO")[1])
+	Local cNatFat   := AllTrim(SuperGetMV(IIf(cTab == "SE1", "MV_XNATFTR", "MV_XNATFTP"), .F., ""))
+	Local cParcela  := Space(TamSX3(cPfx + "PARCELA")[1])
+	Local cNumero   := ""
+	Local cCli      := ""
+	Local cLoja     := ""
+	Local cCliAtu   := ""
+	Local cLojaAtu  := ""
+	Local cId       := ""
+	Local cErroLoc  := ""
+	Local cErroAuto := ""
+	Local nRec      := 0
+	Local nTotal    := 0
+	Local nSaldo    := 0
+	Local nValor    := 0
+	Local nK        := 0
+	Local nTent     := 0
+	Local lOk       := .T.
+
+	Private lMsErroAuto    := .F.
+	Private lMsHelpAuto    := .T.
+	Private lAutoErrNoFile := .T.
+
+	// ---- Validação do envelope
+	If !oItem:HasProperty(cAttrIds) .Or. ValType(oItem:GetJsonObject(cAttrIds)) <> "A" .Or. Len(oItem:GetJsonObject(cAttrIds)) == 0
+		cErro := "Atributo " + cAttrIds + " (lista de ids) não informado."
+		Return .F.
+	EndIf
+	aIdsJson := oItem:GetJsonObject(cAttrIds)
+
+	If !oItem:HasProperty("dtVencimento")
+		cErro := "Atributo dtVencimento (dd/mm/aaaa) não informado."
+		Return .F.
+	EndIf
+	dVenc := U_xApiData(oItem:GetJsonObject("dtVencimento"))
+	If Empty(dVenc)
+		cErro := "dtVencimento inválida. Formato esperado: dd/mm/aaaa."
+		Return .F.
+	ElseIf dVenc < dDataBase
+		cErro := "dtVencimento (" + DToC(dVenc) + ") anterior à data de emissão da fatura (" + DToC(dDataBase) + ")."
+		Return .F.
+	EndIf
+
+	If !U_xApiNat(cNatFat)
+		cErro := "Natureza da fatura (" + IIf(cTab == "SE1", "MV_XNATFTR", "MV_XNATFTP") + ") não parametrizada ou inexistente."
+		Return .F.
+	EndIf
+
+	// ---- Validação dos provisórios
+	For nK := 1 To Len(aIdsJson)
+		cId := U_xApiToChar(aIdsJson[nK])
+		If aScan(aDocs, cId) > 0
+			cErro := "Documento " + cId + " informado em duplicidade."
+			Return .F.
+		EndIf
+		aAdd(aDocs, cId)
+	Next nK
+
+	For nK := 1 To Len(aDocs)
+		cId := aDocs[nK]
+		If !U_xApiLocTit(cId, cTab, @nRec, @cErroLoc)
+			cErro := "Documento " + cId + ": " + cErroLoc
+			Return .F.
+		EndIf
+
+		cCliAtu  := U_xApiCampo(cTab, cPfx + cCampoCF, nRec)
+		cLojaAtu := U_xApiCampo(cTab, cPfx + "LOJA", nRec)
+		nSaldo   := U_xApiCampo(cTab, cPfx + "SALDO", nRec)
+		nValor   := U_xApiCampo(cTab, cPfx + "VALOR", nRec)
+
+		If AllTrim(U_xApiCampo(cTab, cPfx + "TIPO", nRec)) <> AllTrim(cTipoPR)
+			cErro := "Documento " + cId + " não é um título provisório (tipo " + AllTrim(U_xApiCampo(cTab, cPfx + "TIPO", nRec)) + ")."
+			Return .F.
+		EndIf
+		If nSaldo <= 0 .Or. nSaldo <> nValor
+			cErro := "Documento " + cId + " já possui baixa ou saldo zerado e não pode ser substituído."
+			Return .F.
+		EndIf
+		If nK == 1
+			cCli  := cCliAtu
+			cLoja := cLojaAtu
+		ElseIf cCli + cLoja <> cCliAtu + cLojaAtu
+			cErro := "Documento " + cId + " pertence a outro " + IIf(cTab == "SE1", "cliente", "fornecedor") + ". Uma fatura deve agrupar títulos de um único " + IIf(cTab == "SE1", "cliente", "fornecedor") + "."
+			Return .F.
+		EndIf
+
+		aAdd(aRecs, nRec)
+		nTotal += nSaldo
+	Next nK
+	nTotal := Round(nTotal, 2)
+
+	// ---- Número da fatura (SXE/SXF); evita chave já existente
+	DbSelectArea(cTab)
+	(cTab)->(DbSetOrder(1))
+	For nTent := 1 To 10
+		cNumero := GetSxeNum(cTab, cPfx + "NUM")
+		If cTab == "SE1"
+			If !SE1->(DbSeek(xFilial("SE1") + cPrefixo + cNumero + cParcela + cTipoFat))
+				Exit
+			EndIf
+		Else
+			If !SE2->(DbSeek(xFilial("SE2") + cPrefixo + cNumero + cParcela + cTipoFat + cCli + cLoja))
+				Exit
+			EndIf
+		EndIf
+		ConfirmSX8()
+		cNumero := ""
+	Next nTent
+	If Empty(cNumero)
+		cErro := "Não foi possível obter um número de fatura livre."
+		Return .F.
+	EndIf
+
+	// ---- Cabeçalho do título definitivo
+	aAdd(aCab, {cPfx + "PREFIXO", cPrefixo                      , Nil})
+	aAdd(aCab, {cPfx + "NUM"    , cNumero                       , Nil})
+	aAdd(aCab, {cPfx + "PARCELA", cParcela                      , Nil})
+	aAdd(aCab, {cPfx + "TIPO"   , cTipoFat                      , Nil})
+	aAdd(aCab, {cPfx + "NATUREZ", cNatFat                       , Nil})
+	aAdd(aCab, {cPfx + cCampoCF , cCli                          , Nil})
+	aAdd(aCab, {cPfx + "LOJA"   , cLoja                         , Nil})
+	aAdd(aCab, {cPfx + "RATEIO" , "N"                           , Nil})
+	aAdd(aCab, {cPfx + "MULTNAT", "2"                           , Nil})
+	If cTab == "SE2" .And. SuperGetMV("MV_CTLIPAG", .F., .F.)
+		aAdd(aCab, {"E2_DATALIB", dDataBase                     , Nil})
+	EndIf
+	aAdd(aCab, {cPfx + "EMISSAO", dDataBase                     , Nil})
+	aAdd(aCab, {cPfx + "VENCTO" , dVenc                         , Nil})
+	aAdd(aCab, {cPfx + "VENCREA", DataValida(dVenc)             , Nil})
+	aAdd(aCab, {cPfx + "VALOR"  , nTotal                        , Nil})
+	aAdd(aCab, {cPfx + "VLCRUZ" , nTotal                        , Nil})
+	aAdd(aCab, {cPfx + "MOEDA"  , 1                             , Nil})
+	aAdd(aCab, {cPfx + "FLUXO"  , "S"                           , Nil})
+	aAdd(aCab, {cPfx + "HIST"   , "FATURA GESTAO - " + cValToChar(Len(aRecs)) + " PR", Nil})
+
+	// ---- Inclui o definitivo e substitui os PR (tudo ou nada)
+	Begin Transaction
+
+		If !fSubstPR(cTab, aCab, aRecs, @cErroAuto)
+			lOk := .F.
+			cErro := cErroAuto
+			DisarmTransaction()
+		EndIf
+
+	End Transaction
+
+	If !lOk
+		RollBackSX8()
+		Return .F.
+	EndIf
+	ConfirmSX8()
+
+	cIdFat := U_xApiFK7Id(cTab, cPrefixo + cNumero + cParcela + cTipoFat + cCli + cLoja)
+	If Empty(cIdFat)
+		cErro := "Fatura gravada, mas FK7_IDDOC não localizado (prefixo " + AllTrim(cPrefixo) + " número " + cNumero + ")."
+		Return .F.
+	EndIf
+
+Return .T.
+
+//-----------------------------------------------------------------------------------------------------
+// Substituição dos títulos provisórios pelo definitivo - ExecAuto NATIVO da opção "Substituir"
+// (confirmado nos fontes FINA040 e FINA050):
+//   SE1: FINA040(aRotAuto, 6, aTitPrv)              -> aTitPrv é o 3o parâmetro
+//   SE2: FINA050(aRotAuto, , 6, , , , , , aTitPrv)  -> aTitPrv é o 9o parâmetro
+//   - aRotAuto = cabeçalho do título definitivo (como numa inclusão);
+//   - nOpcAuto 6 = opção "Substituir" do aRotina;
+//   - aTitPrv = lista de PR; cada item {PREFIXO, NUM, PARCELA, TIPO, CLIENTE|FORNECE, LOJA}.
+//   O PR é BAIXADO (FINA070/FINA080) com motivo STP e ligado ao definitivo nas tabelas FIH (CR) / FII (CP).
+//   Se existir o ponto de entrada F40DELPR / F50DELPR retornando .T., o PR é excluído em vez de baixado.
+//   Pré-requisitos: motivo de baixa STP cadastrado e permissão de acesso 23 para o usuário do REST.
+//   Regra do FINA040: a data base não pode ser menor que a emissão do PR.
+//
+// Deve ser chamada dentro de Begin Transaction (o DisarmTransaction fica no chamador).
+//-----------------------------------------------------------------------------------------------------
+Static Function fSubstPR(cTab, aCabDef, aRecsPR, cErro)
+
+	Local nK      := 0
+	Local aTitPrv := {}
+	Local aItem   := {}
+	Local cPfx    := IIf(cTab == "SE1", "E1_", "E2_")
+	Local cCampoCF := IIf(cTab == "SE1", "E1_CLIENTE", "E2_FORNECE")
+
+	Private lMsErroAuto    := .F.
+	Private lMsHelpAuto    := .T.
+	Private lAutoErrNoFile := .T.
+
+	For nK := 1 To Len(aRecsPR)
+		aItem := {}
+		aAdd(aItem, {cPfx + "PREFIXO", U_xApiCampo(cTab, cPfx + "PREFIXO", aRecsPR[nK]), Nil})
+		aAdd(aItem, {cPfx + "NUM"    , U_xApiCampo(cTab, cPfx + "NUM"    , aRecsPR[nK]), Nil})
+		aAdd(aItem, {cPfx + "PARCELA", U_xApiCampo(cTab, cPfx + "PARCELA", aRecsPR[nK]), Nil})
+		aAdd(aItem, {cPfx + "TIPO"   , U_xApiCampo(cTab, cPfx + "TIPO"   , aRecsPR[nK]), Nil})
+		aAdd(aItem, {cCampoCF        , U_xApiCampo(cTab, cCampoCF        , aRecsPR[nK]), Nil})
+		aAdd(aItem, {cPfx + "LOJA"   , U_xApiCampo(cTab, cPfx + "LOJA"   , aRecsPR[nK]), Nil})
+		aAdd(aTitPrv, aItem)
+	Next nK
+
+	DbSelectArea(cTab)
+	(cTab)->(DbSetOrder(1))
+	(cTab)->(DbGoTo(aRecsPR[1]))
+
+	If cTab == "SE1"
+		MsExecAuto({|a,b,c| FINA040(a,b,c)}, aCabDef, 6, aTitPrv)
+	Else
+		MsExecAuto({|a,b,c,d,e,f,g,h,i| FINA050(a,b,c,d,e,f,g,h,i)}, aCabDef, Nil, 6, Nil, Nil, Nil, Nil, Nil, aTitPrv)
+	EndIf
+
+	If lMsErroAuto
+		cErro := U_xApiErroAuto()
+		Return .F.
+	EndIf
+
+Return .T.
+
+//-----------------------------------------------------------------------------------------------------
+// Schema JSON desta API (validado pelo U_xApiVld do SchemaJSON.tlpp)
+//-----------------------------------------------------------------------------------------------------
+Static Function fSchema()
+
+	Local cSch := ""
+
+		cSch += '{' + CRLF
+		cSch += '  "title": "FecharFaturaFornecedor",' + CRLF
+		cSch += '  "type": "object",' + CRLF
+		cSch += '  "required": ["body"],' + CRLF
+		cSch += '  "properties": {' + CRLF
+		cSch += '    "body": {' + CRLF
+		cSch += '      "type": "array",' + CRLF
+		cSch += '      "minItems": 1,' + CRLF
+		cSch += '      "items": {' + CRLF
+		cSch += '        "type": "object",' + CRLF
+		cSch += '        "required": ["idsPagamento", "dtVencimento"],' + CRLF
+		cSch += '        "properties": {' + CRLF
+		cSch += '          "idsPagamento": { "type": "array", "minItems": 1, "maxItems": 1000 },' + CRLF
+		cSch += '          "dtVencimento": { "type": "string", "pattern": "^[0-9]{2}/[0-9]{2}/[0-9]{4}$" }' + CRLF
+		cSch += '        }' + CRLF
+		cSch += '      }' + CRLF
+		cSch += '    }' + CRLF
+		cSch += '  }' + CRLF
+		cSch += '}' + CRLF
+
+Return cSch

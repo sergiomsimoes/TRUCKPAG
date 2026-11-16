@@ -1,0 +1,594 @@
+#Include 'Protheus.ch'
+#Include 'TopConn.ch'
+#Include 'TBIConn.ch'
+#Include 'tlpp-core.th'
+#Include 'tlpp-rest.th'
+
+/*/{Protheus.doc} Infraestrutura das APIs de integração (Sistema Gestão x Protheus) - versão TLPP
+	Reúne o que é comum a todas as APIs:
+	- U_xApiEnv  / U_xApiEnvR : preparação do ambiente (empresa/filial) e retorno ao ambiente original
+	- U_xApiAbre/U_xApiResp   : início e fim de toda requisição (ambiente, LOG, JSON, Schema, resposta)
+	- U_xApi... (demais)      : utilitários e buscas comuns às APIs
+	(o Schema JSON de cada API fica no próprio fonte API_<nome>.tlpp e é validado pelo U_xApiVld do SchemaJSON.tlpp)
+	- U_xApiLogI / U_xApiLogF : controle de LOG de cada requisição (tabela ZGL)
+
+	TABELA ZGL - Log de processamento das APIs (criar no Configurador - SX2/SX3/SIX)
+	-----------------------------------------------------------------------------------------
+	Campo        Tipo  Tam  Dec  Descrição
+	ZGL_FILIAL   C     (padrão)  Filial
+	ZGL_CODREF   C     15   0    Código sequencial do LOG (chave)
+	ZGL_API      C     100  0    API acionada (ex.: titulos_provisorios)
+	ZGL_METODO   C     6    0    Método HTTP (POST)
+	ZGL_EMPFIL   C     12   0    Empresa,Filial em que a requisição foi processada
+	ZGL_DTINI    D     8    0    Data de início
+	ZGL_HRINI    C     8    0    Hora de início (HH:MM:SS)
+	ZGL_DTFIM    D     8    0    Data de término
+	ZGL_HRFIM    C     8    0    Hora de término (HH:MM:SS)
+	ZGL_DURSEG   N     10   3    Duração em segundos
+	ZGL_STATUS   C     1    0    0=Processando 1=Sucesso 2=Erro 3=Parcial
+	ZGL_HTTP     N     3    0    Código HTTP devolvido
+	ZGL_ITENS    N     5    0    Quantidade de itens da requisição
+	ZGL_ITOK     N     5    0    Itens processados com sucesso
+	ZGL_ITERR    N     5    0    Itens com erro
+	ZGL_MSGERR   M     10   0    Mensagem de erro / resumo
+	ZGL_JSONBOD  M     10   0    JSON recebido
+	ZGL_JSONRET  M     10   0    JSON devolvido
+	Índice 1: ZGL_FILIAL+ZGL_CODREF   |   Índice 2: ZGL_FILIAL+ZGL_API+DTOS(ZGL_DTINI)+ZGL_HRINI
+	Registro com ZGL_STATUS = 0 e sem término indica requisição que não terminou (queda/timeout);
+	serve de base para a rotina de reconciliação prevista na MIT044.
+
+	@type user function
+	@author Leandro Massafera
+	@since 02/11/2026
+	@version 1.0
+/*/
+
+//=====================================================================================================
+// PREPARAÇÃO DO AMBIENTE
+// Ordem de decisão da empresa/filial:
+//   1) header tenantId  -> "EMPRESA,FILIAL" (ex.: 01,0101)
+//   2) header cnpjEmpresa -> CNPJ de uma filial cadastrada no SM0
+//   3) nenhum dos dois  -> mantém o ambiente em que a thread REST já está
+// Se o ambiente pedido for diferente do atual, troca com RpcSetEnv.
+// cEmpFil devolve "EMPRESA,FILIAL" do ambiente efetivamente usado.
+//=====================================================================================================
+User Function xApiEnv(cEmpFil, cMsg)
+
+	Local xTenant := fHeader("tenantId")
+	Local xCnpj   := fHeader("cnpjEmpresa")
+	Local aPart   := {}
+	Local cEmp    := ""
+	Local cFil    := ""
+	Local lRet    := .T.
+
+	cMsg := ""
+
+	If ValType(xTenant) == "C" .AND. !Empty(AllTrim(xTenant))
+
+		aPart := StrTokArr(AllTrim(xTenant), ",")
+		If Len(aPart) < 2
+			cMsg := "Header tenantId inválido. Formato esperado: EMPRESA,FILIAL."
+			Return .F.
+		EndIf
+		cEmp := AllTrim(aPart[1])
+		cFil := AllTrim(aPart[2])
+
+	ElseIf ValType(xCnpj) == "C" .AND. !Empty(AllTrim(xCnpj))
+
+		If !fAchaCnpj(xCnpj, @cEmp, @cFil)
+			cMsg := "CNPJ " + AllTrim(xCnpj) + " (header cnpjEmpresa) não encontrado no cadastro de empresas/filiais."
+			Return .F.
+		EndIf
+
+	EndIf
+
+	// Sem indicação: segue no ambiente atual
+	If Empty(cEmp) .OR. Empty(cFil)
+		cEmpFil := AllTrim(cEmpAnt) + "," + AllTrim(cFilAnt)
+		Return .T.
+	EndIf
+
+	// Já está no ambiente certo
+	If AllTrim(cEmpAnt) == cEmp .AND. AllTrim(cFilAnt) == cFil
+		cEmpFil := cEmp + "," + cFil
+		Return .T.
+	EndIf
+
+	If !FWFilExist(cEmp, cFil)
+		cMsg := "Empresa/Filial " + cEmp + "," + cFil + " não existe no cadastro de empresas."
+		Return .F.
+	EndIf
+
+	RpcClearEnv()
+	RpcSetType(3)
+	lRet := RpcSetEnv(cEmp, cFil, , , "FIN")
+
+	If !lRet
+		cMsg := "Não foi possível preparar o ambiente na empresa/filial " + cEmp + "," + cFil + "."
+		Return .F.
+	EndIf
+
+	cEmpFil := cEmp + "," + cFil
+
+Return .T.
+
+// Volta ao ambiente em que a thread estava antes da requisição (evita "vazar" a empresa para o próximo request)
+User Function xApiEnvR(cEmpOri, cFilOri)
+
+	If !Empty(cEmpOri) .AND. !Empty(cFilOri) .AND. (AllTrim(cEmpAnt) != AllTrim(cEmpOri) .OR. AllTrim(cFilAnt) != AllTrim(cFilOri))
+
+		RpcClearEnv()
+		RpcSetType(3)
+		RpcSetEnv(AllTrim(cEmpOri), AllTrim(cFilOri), , , "FIN")
+
+	EndIf
+
+Return .T.
+
+// Lê um header da requisição (oRest:GetHeaderRequest). Devolve "" se não vier.
+Static Function fHeader(cKey)
+
+	Local jHead := oRest:GetHeaderRequest()
+	Local xVal  := Nil
+	Local cRet  := ""
+
+	If ValType(jHead) == "J"
+		If jHead:HasProperty(cKey)
+			xVal := jHead[cKey]
+		ElseIf jHead:HasProperty(Lower(cKey))
+			xVal := jHead[Lower(cKey)]
+		EndIf
+	EndIf
+
+	If ValType(xVal) == "C"
+		cRet := AllTrim(xVal)
+	EndIf
+
+Return cRet
+
+// Procura a filial pelo CNPJ no SM0
+Static Function fAchaCnpj(cCnpj, cEmp, cFil)
+
+	Local aArea := GetArea()
+	Local cCgc  := ""
+	Local lAch  := .F.
+	Local nK    := 0
+	Local cCh   := ""
+
+	// Só dígitos
+	For nK := 1 To Len(cCnpj)
+		cCh := SubStr(cCnpj, nK, 1)
+		If cCh >= "0" .AND. cCh <= "9"
+			cCgc += cCh
+		EndIf
+	Next nK
+
+	OpenSM0()
+	DbSelectArea("SM0")
+	SM0->(DbSetOrder(1))
+	SM0->(DbGoTop())
+
+	While !SM0->(Eof()) .AND. !lAch
+		If AllTrim(SM0->M0_CGC) == cCgc
+			cEmp := AllTrim(SM0->M0_CODIGO)
+			cFil := AllTrim(SM0->M0_CODFIL)
+			lAch := .T.
+		EndIf
+		SM0->(DbSkip())
+	EndDo
+
+	RestArea(aArea)
+
+Return lAch
+
+//=====================================================================================================
+// CONTROLE DE LOG (tabela ZGL)
+//=====================================================================================================
+
+// Abre o LOG da requisição. Retorna o ZGL_CODREF (vazio se a tabela não existir ou falhar a gravação).
+User Function xApiLogI(cApi, cJSON, cEmpFil)
+
+	Local cCod  := ""
+	Local aArea := GetArea()
+
+	If !ChkFile("ZGL")
+		ConOut("API_INFRA -> Tabela ZGL não existe no dicionário. A requisição será processada sem LOG.")
+		Return ""
+	EndIf
+
+	cCod := GetSxeNum("ZGL", "ZGL_CODREF")
+
+	DbSelectArea("ZGL")
+	If RecLock("ZGL", .T.)
+		ZGL->ZGL_FILIAL := xFilial("ZGL")
+		ZGL->ZGL_CODREF := cCod
+		ZGL->ZGL_API    := cApi
+		ZGL->ZGL_METODO := "POST"
+		ZGL->ZGL_EMPFIL := cEmpFil
+		ZGL->ZGL_DTINI  := Date()
+		ZGL->ZGL_HRINI  := Time()
+		ZGL->ZGL_STATUS := "0"
+		ZGL->ZGL_JSONBOD:= cJSON
+		MsUnlock()
+		ConfirmSX8()
+	Else
+		RollBackSX8()
+		cCod := ""
+	EndIf
+
+	RestArea(aArea)
+
+Return cCod
+
+// Fecha o LOG: término, duração, status, HTTP, contadores, mensagem e JSON devolvido.
+// Status: 1=Sucesso (HTTP < 300) | 3=Parcial (erro, mas com itens gravados) | 2=Erro
+User Function xApiLogF(cCod, nSecIni, nHttp, cResp, cMsgErr, nItens, nOk, nErr)
+
+	Local aArea := GetArea()
+	Local nDur  := Seconds() - nSecIni
+	Local cSts  := ""
+
+	If Empty(cCod)
+		Return .F.
+	EndIf
+
+	If nDur < 0
+		nDur += 86400 // virou o dia durante o processamento
+	EndIf
+
+	If nHttp < 300
+		cSts := "1"
+	ElseIf nOk > 0
+		cSts := "3"
+	Else
+		cSts := "2"
+	EndIf
+
+	DbSelectArea("ZGL")
+	ZGL->(DbSetOrder(1))
+	If ZGL->(DbSeek(xFilial("ZGL") + cCod)) .And. RecLock("ZGL", .F.)
+		ZGL->ZGL_DTFIM  := Date()
+		ZGL->ZGL_HRFIM  := Time()
+		ZGL->ZGL_DURSEG := Round(nDur, 3)
+		ZGL->ZGL_STATUS := cSts
+		ZGL->ZGL_HTTP   := nHttp
+		ZGL->ZGL_ITENS  := nItens
+		ZGL->ZGL_ITOK   := nOk
+		ZGL->ZGL_ITERR  := nErr
+		ZGL->ZGL_MSGERR := cMsgErr
+		ZGL->ZGL_JSONRET:= cResp
+		MsUnlock()
+	EndIf
+
+	RestArea(aArea)
+
+Return .T.
+
+//=====================================================================================================
+// FUNÇÕES COMUNS ÀS APIs (usadas por todos os fontes API_<nome>.tlpp)
+// U_xApiAbre  : ambiente -> LOG de início -> JSON -> Schema (início de toda requisição)
+// U_xApiResp  : responde ao cliente, fecha o LOG e volta ao ambiente original
+// Demais      : utilitários de texto/data/número e buscas de cliente, fornecedor e título
+//=====================================================================================================
+
+// Início de toda requisição: (1) prepara empresa/filial, (2) abre o LOG, (3) lê o JSON e
+// (4) valida a estrutura contra o Schema da API. Em qualquer falha já responde ao cliente e
+// devolve .F. (o método só precisa dar Return).
+// aCtx = {CODREF do LOG, Seconds() inicial, empresa original, filial original, API}
+User Function xApiAbre(cApi, cSch, cJSON, aCtx, oObj, aBody)
+
+	Local cEmpFil := ""
+	Local cMsg    := ""
+	Local cErro   := ""
+
+	oRest:SetKeyHeaderResponse("Content-Type", "application/json;charset=utf-8")
+
+	aCtx := {"", Seconds(), cEmpAnt, cFilAnt, cApi}
+
+	ConOut("API_FINANCEIRO -> " + cApi + " JSON: " + cJSON)
+
+	// 1) Ambiente
+	If !U_xApiEnv(@cEmpFil, @cMsg)
+		U_xApiResp(aCtx, 400, U_xApiMsg(cMsg), cMsg)
+		Return .F.
+	EndIf
+
+	// 2) LOG (depois do ambiente, pois a ZGL é da empresa/filial)
+	aCtx[1] := U_xApiLogI(cApi, cJSON, cEmpFil)
+
+	// 3) JSON
+	If !fLeBody(cJSON, @oObj, @aBody, @cErro)
+		U_xApiResp(aCtx, 400, U_xApiMsg(cErro), cErro)
+		Return .F.
+	EndIf
+
+	// 4) Schema
+	If !U_xApiVld(cSch, oObj, @cErro)
+		cErro := StrTran(StrTran(cErro, Chr(13) + Chr(10), " | "), Chr(10), " | ")
+		U_xApiResp(aCtx, 400, U_xApiMsg("Estrutura do JSON inválida: " + cErro), "Estrutura do JSON inválida: " + cErro)
+		Return .F.
+	EndIf
+
+Return .T.
+
+// Responde ao cliente, fecha o LOG e volta ao ambiente original da thread
+User Function xApiResp(aCtx, nHttp, cBody, cMsgErr, nItens, nOk, nErr)
+
+	Local cOut := ""
+
+	Default nItens := 0
+	Default nOk    := 0
+	Default nErr   := 0
+
+	// Resposta em UTF-8 (o LOG guarda o texto original)
+	cOut := EncodeUTF8(cBody)
+	If ValType(cOut) <> "C"
+		cOut := cBody
+	EndIf
+
+	oRest:SetStatusCode(nHttp)
+	oRest:SetResponse(cOut)
+
+	If Len(aCtx) >= 5
+		U_xApiLogF(aCtx[1], aCtx[2], nHttp, cBody, cMsgErr, nItens, nOk, nErr)
+		U_xApiEnvR(aCtx[3], aCtx[4])
+	EndIf
+
+Return .T.
+
+// Lê e valida o envelope {"body": [ ... ]}
+Static Function fLeBody(cJSON, oObj, aBody, cErro)
+
+	Local cRet := ""
+
+	oObj := JsonObject():New()
+	cRet := oObj:FromJson(cJSON)
+
+	If ValType(cRet) == "C"
+		cErro := "JSON inválido: " + cRet
+		Return .F.
+	EndIf
+
+	If !oObj:HasProperty("body") .Or. ValType(oObj:GetJsonObject("body")) <> "A"
+		cErro := 'Body com estrutura inválida. Atributo "body" (lista) não encontrado.'
+		Return .F.
+	EndIf
+
+	aBody := oObj:GetJsonObject("body")
+	If Len(aBody) == 0
+		cErro := 'Body com estrutura inválida. A lista "body" está vazia.'
+		Return .F.
+	EndIf
+
+Return .T.
+
+// Retorna os atributos obrigatórios ausentes ou vazios (separados por vírgula)
+User Function xApiFalta(oItem, aAttrs)
+
+	Local cFalta := ""
+	Local nK     := 0
+	Local xVal   := Nil
+
+	For nK := 1 To Len(aAttrs)
+		If !oItem:HasProperty(aAttrs[nK])
+			cFalta += IIf(Empty(cFalta), "", ", ") + aAttrs[nK]
+		Else
+			xVal := oItem:GetJsonObject(aAttrs[nK])
+			If xVal == Nil .Or. (ValType(xVal) == "C" .And. Empty(AllTrim(xVal))) .Or. (ValType(xVal) == "A" .And. Len(xVal) == 0)
+				cFalta += IIf(Empty(cFalta), "", ", ") + aAttrs[nK]
+			EndIf
+		EndIf
+	Next nK
+
+Return cFalta
+
+// Corpo de erro simples: {"message": "..."}
+User Function xApiMsg(cMsg)
+
+	Local oMsg := JsonObject():New()
+	Local cRet := ""
+
+	oMsg["message"] := cMsg
+	cRet := oMsg:ToJson()
+	FreeObj(oMsg)
+
+Return cRet
+
+// Converte valor (número ou texto) em texto sem decimais e sem espaços
+User Function xApiToChar(xVal)
+
+	Local cRet := ""
+
+	If ValType(xVal) == "N"
+		cRet := AllTrim(Str(Int(xVal)))
+	ElseIf ValType(xVal) == "C"
+		cRet := AllTrim(xVal)
+	ElseIf xVal <> Nil
+		cRet := AllTrim(cValToChar(xVal))
+	EndIf
+
+Return cRet
+
+User Function xApiNum(cTexto)
+
+	Local cRet := ""
+	Local nK   := 0
+	Local cCh  := ""
+
+	cTexto := cValToChar(cTexto)
+	For nK := 1 To Len(cTexto)
+		cCh := SubStr(cTexto, nK, 1)
+		If cCh >= "0" .And. cCh <= "9"
+			cRet += cCh
+		EndIf
+	Next nK
+
+Return cRet
+
+User Function xApiDig(cTexto)
+Return !Empty(cTexto) .And. Len(U_xApiNum(cTexto)) == Len(AllTrim(cTexto))
+
+// dd/mm/aaaa -> Date (vazio se inválida)
+User Function xApiData(cData)
+
+	Local dRet := CToD("")
+
+	cData := AllTrim(cValToChar(cData))
+	If Len(cData) == 10 .And. SubStr(cData, 3, 1) == "/" .And. SubStr(cData, 6, 1) == "/"
+		dRet := SToD(SubStr(cData, 7, 4) + SubStr(cData, 4, 2) + SubStr(cData, 1, 2))
+	EndIf
+
+Return dRet
+
+// Lê um campo de qualquer alias/recno sem depender do posicionamento atual
+User Function xApiCampo(cAlias, cCampo, nRecno)
+
+	Local xRet := Nil
+	Local nPos := (cAlias)->(FieldPos(cCampo))
+
+	If nRecno <> Nil .And. nRecno > 0
+		(cAlias)->(DbGoTo(nRecno))
+	EndIf
+	If nPos > 0
+		xRet := (cAlias)->(FieldGet(nPos))
+	EndIf
+
+Return xRet
+
+User Function xApiNat(cNatureza)
+
+	Local lRet := .F.
+
+	If !Empty(AllTrim(cNatureza))
+		DbSelectArea("SED")
+		SED->(DbSetOrder(1))
+		lRet := SED->(DbSeek(xFilial("SED") + PadR(AllTrim(cNatureza), TamSX3("ED_CODIGO")[1])))
+	EndIf
+
+Return lRet
+
+// Localiza cliente (SA1) ou fornecedor (SA2) pelo CNPJ. Havendo mais de um cadastro ativo com o
+// mesmo CNPJ, desempata pelo código IBGE do município (A1_COD_MUN / A2_COD_MUN, 5 últimos dígitos).
+User Function xApiCliFor(cAlias, cCnpj, xMun, cCod, cLoja, cErro)
+
+	Local cPfx     := IIf(cAlias == "SA1", "A1_", "A2_")
+	Local cRotulo  := IIf(cAlias == "SA1", "cliente", "fornecedor")
+	Local cCgc     := PadR(U_xApiNum(cCnpj), TamSX3(cPfx + "CGC")[1])
+	Local cMun     := Right(StrZero(Val(U_xApiToChar(xMun)), 7), 5)
+	Local aAtivos  := {}
+	Local lBloq    := .F.
+	Local nK       := 0
+
+	cCod  := ""
+	cLoja := ""
+
+	DbSelectArea(cAlias)
+	(cAlias)->(DbSetOrder(3))
+	If !(cAlias)->(DbSeek(xFilial(cAlias) + cCgc))
+		cErro := "CNPJ " + AllTrim(cCgc) + " não encontrado no cadastro de " + cRotulo + "s do Protheus."
+		Return .F.
+	EndIf
+
+	While !(cAlias)->(Eof()) .And. (cAlias)->(FieldGet(FieldPos(cPfx + "FILIAL"))) == xFilial(cAlias) .And. (cAlias)->(FieldGet(FieldPos(cPfx + "CGC"))) == cCgc
+		If (cAlias)->(FieldGet(FieldPos(cPfx + "MSBLQL"))) == "1"
+			lBloq := .T.
+		Else
+			aAdd(aAtivos, {(cAlias)->(FieldGet(FieldPos(cPfx + "COD"))), (cAlias)->(FieldGet(FieldPos(cPfx + "LOJA"))), AllTrim((cAlias)->(FieldGet(FieldPos(cPfx + "COD_MUN"))))})
+		EndIf
+		(cAlias)->(DbSkip())
+	EndDo
+
+	If Len(aAtivos) == 0
+		cErro := "CNPJ " + AllTrim(cCgc) + IIf(lBloq, " bloqueado", " sem cadastro ativo") + " no cadastro de " + cRotulo + "s do Protheus."
+		Return .F.
+	EndIf
+
+	If Len(aAtivos) == 1
+		cCod  := aAtivos[1][1]
+		cLoja := aAtivos[1][2]
+		Return .T.
+	EndIf
+
+	For nK := 1 To Len(aAtivos)
+		If aAtivos[nK][3] == cMun
+			cCod  := aAtivos[nK][1]
+			cLoja := aAtivos[nK][2]
+			Return .T.
+		EndIf
+	Next nK
+
+	cErro := "CNPJ " + AllTrim(cCgc) + " possui mais de um cadastro de " + cRotulo + " e nenhum no município IBGE " + cMun + "."
+
+Return .F.
+
+// FK7_IDDOC do título (chave: prefixo+num+parcela+tipo+cliente/fornecedor+loja)
+User Function xApiFK7Id(cAlias, cChave)
+
+	Local aArea := FK7->(GetArea())
+	Local cId   := ""
+
+	DbSelectArea("FK7")
+	FK7->(DbSetOrder(3))
+	If FK7->(DbSeek(xFilial("FK7") + cAlias + xFilial(cAlias) + cChave))
+		cId := FK7->FK7_IDDOC
+	EndIf
+
+	RestArea(aArea)
+
+Return cId
+
+// Localiza o título (SE1/SE2) a partir do FK7_IDDOC. Devolve o RECNO do título.
+User Function xApiLocTit(cId, cAlias, nRecno, cErro)
+
+	Local aAreaFK7 := FK7->(GetArea())
+	Local cPfx     := IIf(cAlias == "SE1", "E1_", "E2_")
+	Local cChave   := ""
+	Local lRet     := .F.
+
+	nRecno := 0
+
+	If Empty(cId)
+		cErro := "identificador em branco."
+		Return .F.
+	EndIf
+
+	DbSelectArea("FK7")
+	FK7->(DbSetOrder(1))
+	If !FK7->(DbSeek(xFilial("FK7") + PadR(cId, TamSX3("FK7_IDDOC")[1])))
+		cErro := "não encontrado no Protheus."
+	ElseIf AllTrim(FK7->FK7_ALIAS) <> cAlias
+		cErro := "não é um título de " + IIf(cAlias == "SE1", "Contas a Receber", "Contas a Pagar") + "."
+	Else
+		cChave := xFilial(cAlias) + FK7->FK7_PREFIX + FK7->FK7_NUM + FK7->FK7_PARCEL + FK7->FK7_TIPO
+		If cAlias == "SE2"
+			cChave += FK7->FK7_CLIFOR + FK7->FK7_LOJA
+		EndIf
+
+		DbSelectArea(cAlias)
+		(cAlias)->(DbSetOrder(1))
+		If !(cAlias)->(DbSeek(cChave))
+			cErro := "título não localizado (possivelmente já substituído ou excluído)."
+		ElseIf cAlias == "SE1" .And. SE1->E1_CLIENTE + SE1->E1_LOJA <> FK7->FK7_CLIFOR + FK7->FK7_LOJA
+			cErro := "título localizado pertence a outro cliente."
+		Else
+			nRecno := (cAlias)->(Recno())
+			lRet := .T.
+		EndIf
+	EndIf
+
+	RestArea(aAreaFK7)
+
+Return lRet
+
+// Mensagem de erro do ExecAuto numa linha, sem acentos
+User Function xApiErroAuto()
+
+	Local aErro := GetAutoGRLog()
+	Local cErro := ""
+	Local nK    := 0
+
+	For nK := 1 To Len(aErro)
+		cErro += AllTrim(StrTran(StrTran(aErro[nK], Chr(13), " "), Chr(10), " ")) + " | "
+	Next nK
+
+Return FwNoAccent(cErro)

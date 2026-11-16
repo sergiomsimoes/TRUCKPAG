@@ -1,0 +1,136 @@
+#Include 'Protheus.ch'
+#Include 'TopConn.ch'
+#Include 'tlpp-core.th'
+#Include 'tlpp-rest.th'
+
+/*/{Protheus.doc} API_estorno_provisorio
+	API 02 - EstornarTituloProvisorio: valida o envelope, os cadastros e o título original. Regra de compensação ainda indefinida (responde HTTP 501).
+	Endpoint: POST /financeiro/estorno_provisorio (função U_API_estorno_provisorio), envelope {"body": [ ... ]}.
+
+	Compilar junto: api_infra.tlpp (ambiente, LOG ZGL e funções comuns) e SchemaJSON.tlpp (U_xApiVld).
+	Fluxo da requisição: ambiente -> LOG de início -> JSON -> Schema -> processamento -> LOG de término.
+
+	@type user function
+	@author Leandro Massafera
+	@since 05/11/2026
+	@version 1.0
+/*/
+
+// 05/11/2026 - Leandro Massafera - Fonte individual desta API (separado do antigo api_financeiro)
+
+//=====================================================================================================
+// API 02 - EstornarTituloProvisorio
+// STATUS: regra de compensação AINDA INDEFINIDA (NCC/NDF x PR negativo). Por enquanto a rotina
+// valida o envelope, cadastros e o título original (idNotaFiscal), mas NÃO grava nada no Protheus
+// e responde HTTP 501 para cada item válido.
+//=====================================================================================================
+@Post("/financeiro/estorno_provisorio")
+Function U_API_estorno_provisorio()
+
+	Local cJSON      := oRest:GetBodyRequest()
+	Local oObj       := Nil
+	Local oRet       := JsonObject():New()
+	Local oTrans     := Nil
+	Local aBody      := {}
+	Local aTrans     := {}
+	Local aObrig     := {"nrCpfCnpjBeneficiario","cdMunicipioBeneficiario","nrCpfCnpjPagador","cdMunicipioPagador","dtEmissaoFornec","vlRecebido","vlPago","nrNfFornec","idNotaFiscal"}
+	Local nI         := 0
+	Local cErro      := ""
+	Local cFalta     := ""
+	Local cCod       := ""
+	Local cLoja      := ""
+	Local nRec       := 0
+	Local cMsgItem   := ""
+	Local aCtx       := {}
+
+	If !U_xApiAbre("estorno_provisorio", fSchema(), cJSON, @aCtx, @oObj, @aBody)
+		Return .T.
+	EndIf
+
+	If Len(aBody) > 1000
+		U_xApiResp(aCtx, 400, U_xApiMsg("Lote com " + cValToChar(Len(aBody)) + " transações. O limite é de 1000 por requisição."), "Lote acima de 1000 transações.", Len(aBody), 0, Len(aBody))
+		Return .T.
+	EndIf
+
+	For nI := 1 To Len(aBody)
+		oTrans   := JsonObject():New()
+		cMsgItem := ""
+
+		If ValType(aBody[nI]) <> "J"
+			cMsgItem := "Item inválido."
+		Else
+			cFalta := U_xApiFalta(aBody[nI], aObrig)
+			If !Empty(cFalta)
+				cMsgItem := "Atributos obrigatórios não informados: " + cFalta
+			ElseIf !U_xApiCliFor("SA1", aBody[nI]:GetJsonObject("nrCpfCnpjBeneficiario"), aBody[nI]:GetJsonObject("cdMunicipioBeneficiario"), @cCod, @cLoja, @cMsgItem)
+				// cMsgItem já preenchida (cliente é o beneficiário no registro de compensação)
+			ElseIf !U_xApiCliFor("SA2", aBody[nI]:GetJsonObject("nrCpfCnpjPagador"), aBody[nI]:GetJsonObject("cdMunicipioPagador"), @cCod, @cLoja, @cMsgItem)
+				// cMsgItem já preenchida (fornecedor é o pagador no registro de compensação)
+			ElseIf !U_xApiLocTit(U_xApiToChar(aBody[nI]:GetJsonObject("idNotaFiscal")), "SE2", @nRec, @cMsgItem)
+				cMsgItem := "idNotaFiscal: " + cMsgItem
+			Else
+				cMsgItem := "Estorno ainda não implementado: regra de compensação pendente de definição."
+			EndIf
+		EndIf
+
+		oTrans["nrNfFornec"]      := IIf(ValType(aBody[nI]) == "J" .And. aBody[nI]:HasProperty("nrNfFornec"), U_xApiToChar(aBody[nI]:GetJsonObject("nrNfFornec")), "")
+		oTrans["erroPagamento"]   := cMsgItem
+		oTrans["erroRecebimento"] := cMsgItem
+		aAdd(aTrans, oTrans)
+	Next nI
+
+	oRet["transacoes"] := aTrans
+
+	U_xApiResp(aCtx, 501, oRet:ToJson(), "Estorno ainda não implementado (regra de compensação pendente).", Len(aBody), 0, Len(aBody))
+
+	FreeObj(oRet)
+	FreeObj(oObj)
+
+Return .T.
+
+//-----------------------------------------------------------------------------------------------------
+// Schema JSON desta API (validado pelo U_xApiVld do SchemaJSON.tlpp)
+//-----------------------------------------------------------------------------------------------------
+Static Function fSchema()
+
+	Local cSch := ""
+
+		cSch += '{' + CRLF
+		cSch += '  "title": "EstornarTituloProvisorio",' + CRLF
+		cSch += '  "type": "object",' + CRLF
+		cSch += '  "required": ["body"],' + CRLF
+		cSch += '  "properties": {' + CRLF
+		cSch += '    "body": {' + CRLF
+		cSch += '      "type": "array",' + CRLF
+		cSch += '      "minItems": 1,' + CRLF
+		cSch += '      "maxItems": 1000,' + CRLF
+		cSch += '      "items": {' + CRLF
+		cSch += '        "type": "object",' + CRLF
+		cSch += '        "required": [' + CRLF
+		cSch += '          "nrCpfCnpjBeneficiario",' + CRLF
+		cSch += '          "cdMunicipioBeneficiario",' + CRLF
+		cSch += '          "nrCpfCnpjPagador",' + CRLF
+		cSch += '          "cdMunicipioPagador",' + CRLF
+		cSch += '          "dtEmissaoFornec",' + CRLF
+		cSch += '          "vlRecebido",' + CRLF
+		cSch += '          "vlPago",' + CRLF
+		cSch += '          "nrNfFornec",' + CRLF
+		cSch += '          "idNotaFiscal"' + CRLF
+		cSch += '        ],' + CRLF
+		cSch += '        "properties": {' + CRLF
+		cSch += '          "nrCpfCnpjBeneficiario": { "type": "string", "minLength": 11, "maxLength": 18, "pattern": "^[0-9./-]+$" },' + CRLF
+		cSch += '          "cdMunicipioBeneficiario": { "type": "integer", "minimum": 1 },' + CRLF
+		cSch += '          "nrCpfCnpjPagador": { "type": "string", "minLength": 11, "maxLength": 18, "pattern": "^[0-9./-]+$" },' + CRLF
+		cSch += '          "cdMunicipioPagador": { "type": "integer", "minimum": 1 },' + CRLF
+		cSch += '          "dtEmissaoFornec": { "type": "string", "pattern": "^[0-9]{2}/[0-9]{2}/[0-9]{4}$" },' + CRLF
+		cSch += '          "vlRecebido": { "type": "number" },' + CRLF
+		cSch += '          "vlPago": { "type": "number" },' + CRLF
+		cSch += '          "nrNfFornec": { "type": "integer", "minimum": 1 },' + CRLF
+		cSch += '          "idNotaFiscal": { "type": "string" }' + CRLF
+		cSch += '        }' + CRLF
+		cSch += '      }' + CRLF
+		cSch += '    }' + CRLF
+		cSch += '  }' + CRLF
+		cSch += '}' + CRLF
+
+Return cSch

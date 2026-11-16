@@ -1,0 +1,443 @@
+#Include 'Protheus.ch'
+#Include 'TopConn.ch'
+#Include 'tlpp-core.th'
+#Include 'tlpp-rest.th'
+
+/*/{Protheus.doc} API_cadastro_fornecedor
+	API 10 - CadastroFornecedor: inclui o fornecedor (SA2 via MATA020) quando o CNPJ/CPF ainda não existe.
+	Endpoint: POST /financeiro/cadastro_fornecedor (função U_API_cadastro_fornecedor), envelope {"body": [ ... ]}.
+
+	Compilar junto: api_infra.tlpp (ambiente, LOG ZGL e funções comuns) e SchemaJSON.tlpp (U_xApiVld).
+	Fluxo da requisição: ambiente -> LOG de início -> JSON -> Schema -> processamento -> LOG de término.
+
+	@type user function
+	@author Leandro Massafera
+	@since 05/11/2026
+	@version 1.0
+/*/
+
+// 05/11/2026 - Leandro Massafera - Fonte individual desta API (separado do antigo api_financeiro)
+
+//=====================================================================================================
+// API 10 - CadastroFornecedor
+// Incluem o cliente (SA1 via CRMA980) ou o fornecedor (SA2 via MATA020) quando o CNPJ/CPF ainda não
+// existe no Protheus. As APIs 01 a 04 localizam o cadastro por CNPJ + município (IBGE), então o
+// Sistema Gestão deve chamar estas APIs ANTES de enviar os títulos de um parceiro novo.
+//
+// Regras:
+//   - Chave de existência: CNPJ/CPF + município IBGE (5 últimos dígitos), igual à busca das APIs 01 a 04.
+//   - Já existe com o mesmo CNPJ e município -> NÃO altera nada, devolve o código/loja existentes
+//     (situacao = JA_EXISTENTE). Reenvio do mesmo lote é seguro.
+//   - Existe o CNPJ em OUTRO município -> reaproveita o código e cria a próxima loja.
+//   - CNPJ novo -> código novo pela numeração automática (SXE) e loja 01.
+//   - Município validado na CC2 (UF + código IBGE); o nome do município vem da CC2.
+//   - Textos são convertidos de UTF-8, sem acento, em maiúsculas e cortados no tamanho do dicionário.
+//   - Cada item é gravado ou descartado por inteiro (Begin Transaction).
+//   - Validação do CPF/CNPJ (dígito verificador) fica por conta do próprio ExecAuto (X3_VALID de A1_CGC/A2_CGC).
+//
+// Parâmetro opcional: MV_XTPCLI = tipo do cliente A1_TIPO (default F - consumidor final).
+//=====================================================================================================
+@Post("/financeiro/cadastro_fornecedor")
+Function U_API_cadastro_fornecedor()
+	fCadastro("SA2")
+Return .T.
+
+Static Function fCadastro(cAlias)
+
+	Local cJSON      := oRest:GetBodyRequest()
+	Local oObj       := Nil
+	Local oRet       := JsonObject():New()
+	Local oCad       := Nil
+	Local aBody      := {}
+	Local aCads      := {}
+	Local nI         := 0
+	Local lErroGeral := .F.
+	Local cErro      := ""
+	Local cCod       := ""
+	Local cLoja      := ""
+	Local cSit       := ""
+	Local cRotulo    := IIf(cAlias == "SA1", "Cliente", "Fornecedor")
+	Local aCtx       := {}
+	Local nOk        := 0
+	Local nErr       := 0
+
+	Private lMsErroAuto    := .F.
+	Private lMsHelpAuto    := .T.
+	Private lAutoErrNoFile := .T.
+
+	If !U_xApiAbre(IIf(cAlias == "SA1", "cadastro_cliente", "cadastro_fornecedor"), fSchema(), cJSON, @aCtx, @oObj, @aBody)
+		Return .T.
+	EndIf
+
+	For nI := 1 To Len(aBody)
+		cCod  := ""
+		cLoja := ""
+		cSit  := ""
+		cErro := ""
+		oCad  := JsonObject():New()
+
+		If ValType(aBody[nI]) <> "J"
+			cErro := "Item inválido."
+		Else
+			oCad["nrCpfCnpj"] := IIf(aBody[nI]:HasProperty("nrCpfCnpj"), U_xApiToChar(aBody[nI]:GetJsonObject("nrCpfCnpj")), "")
+			fCadastroItem(aBody[nI], cAlias, @cCod, @cLoja, @cSit, @cErro)
+		EndIf
+
+		If Empty(cErro) .And. !Empty(cCod)
+			nOk++
+			oCad["codigo" + cRotulo] := cCod
+			oCad["loja" + cRotulo]   := cLoja
+			oCad["situacao"]         := cSit
+		Else
+			nErr++
+			lErroGeral := .T.
+			oCad["erro"] := cErro
+			ConOut("API_FINANCEIRO -> cadastro " + cAlias + " ERRO: " + cErro)
+		EndIf
+		aAdd(aCads, oCad)
+	Next nI
+
+	oRet["cadastros"] := aCads
+
+	U_xApiResp(aCtx, IIf(lErroGeral, 400, 200), oRet:ToJson(), IIf(lErroGeral, cValToChar(nErr) + " cadastro(s) com erro.", ""), nOk + nErr, nOk, nErr)
+
+	FreeObj(oRet)
+	FreeObj(oObj)
+
+Return .T.
+
+//-----------------------------------------------------------------------------------------------------
+// Inclui um cliente/fornecedor (um item do body das APIs 09/10)
+// Atributos obrigatórios : nrCpfCnpj, nmRazaoSocial, cdMunicipio (IBGE), sgUf, dsEndereco, nmBairro, nrCep
+// Atributos opcionais    : nmFantasia, nrInscricaoEstadual (default ISENTO), nrInscricaoMunicipal,
+//                          dsEmail, nrDdd, nrTelefone
+//-----------------------------------------------------------------------------------------------------
+Static Function fCadastroItem(oItem, cAlias, cCod, cLoja, cSit, cErro)
+
+	Local aObrig    := {"nrCpfCnpj","nmRazaoSocial","cdMunicipio","sgUf","dsEndereco","nmBairro","nrCep"}
+	Local cFalta    := U_xApiFalta(oItem, aObrig)
+	Local cPfx      := IIf(cAlias == "SA1", "A1_", "A2_")
+	Local cRotulo   := IIf(cAlias == "SA1", "cliente", "fornecedor")
+	Local cCgc      := ""
+	Local cPessoa   := ""
+	Local cUF       := ""
+	Local cMun      := ""
+	Local cNomMun   := ""
+	Local cNome     := ""
+	Local cFantasia := ""
+	Local cInscr    := ""
+	Local cCep      := ""
+	Local cCodBase  := ""
+	Local cErroAuto := ""
+	Local aCab      := {}
+	Local nSts      := 0
+	Local lBloq     := .F.
+	Local lNovoCod  := .F.
+	Local lOk       := .T.
+
+	Private lMsErroAuto    := .F.
+	Private lMsHelpAuto    := .T.
+	Private lAutoErrNoFile := .T.
+
+	If !Empty(cFalta)
+		cErro := "Atributos obrigatórios não informados: " + cFalta
+		Return .F.
+	EndIf
+
+	// ---- CPF/CNPJ, CEP, UF e município
+	cCgc := U_xApiNum(oItem:GetJsonObject("nrCpfCnpj"))
+	If Len(cCgc) <> 11 .And. Len(cCgc) <> 14
+		cErro := "nrCpfCnpj deve ter 11 (CPF) ou 14 (CNPJ) dígitos."
+		Return .F.
+	EndIf
+	cPessoa := IIf(Len(cCgc) == 14, "J", "F")
+
+	cCep := U_xApiNum(oItem:GetJsonObject("nrCep"))
+	If Len(cCep) <> 8
+		cErro := "nrCep deve ter 8 dígitos."
+		Return .F.
+	EndIf
+
+	cUF  := Upper(AllTrim(U_xApiToChar(oItem:GetJsonObject("sgUf"))))
+	cMun := Right(StrZero(Val(U_xApiToChar(oItem:GetJsonObject("cdMunicipio"))), 7), 5)
+
+	DbSelectArea("CC2")
+	CC2->(DbSetOrder(1))
+	If !CC2->(DbSeek(xFilial("CC2") + PadR(cUF, TamSX3("CC2_EST")[1]) + PadR(cMun, TamSX3("CC2_CODMUN")[1])))
+		cErro := "Município IBGE " + U_xApiToChar(oItem:GetJsonObject("cdMunicipio")) + " / UF " + cUF + " não cadastrado na tabela CC2 do Protheus."
+		Return .F.
+	EndIf
+	cNomMun := AllTrim(CC2->CC2_MUN)
+
+	// ---- Já existe?
+	nSts := fAchaCadastro(cAlias, cCgc, cMun, @cCod, @cLoja, @cCodBase, @lBloq)
+	If nSts == 1
+		If lBloq
+			cErro := "Já existe " + cRotulo + " " + AllTrim(cCod) + "/" + AllTrim(cLoja) + " para este CNPJ/município, porém bloqueado no Protheus."
+			cCod  := ""
+			Return .F.
+		EndIf
+		cSit := "JA_EXISTENTE"
+		Return .T.
+	EndIf
+
+	// ---- Textos
+	cNome := fTxt(cPfx + "NOME", oItem:GetJsonObject("nmRazaoSocial"))
+	If oItem:HasProperty("nmFantasia") .And. !Empty(U_xApiToChar(oItem:GetJsonObject("nmFantasia")))
+		cFantasia := fTxt(cPfx + "NREDUZ", oItem:GetJsonObject("nmFantasia"))
+	Else
+		cFantasia := fTxt(cPfx + "NREDUZ", cNome)
+	EndIf
+	If oItem:HasProperty("nrInscricaoEstadual") .And. !Empty(U_xApiToChar(oItem:GetJsonObject("nrInscricaoEstadual")))
+		cInscr := fTxt(cPfx + "INSCR", oItem:GetJsonObject("nrInscricaoEstadual"))
+	Else
+		cInscr := "ISENTO"
+	EndIf
+
+	// ---- Código e loja
+	If nSts == 2
+		// CNPJ já cadastrado em outro município: mesmo código, próxima loja
+		cCod  := cCodBase
+		cLoja := fProxLoja(cAlias, cCod)
+	Else
+		cCod := fProxCod(cAlias)
+		If Empty(cCod)
+			cErro := "Não foi possível obter um código livre para o " + cRotulo + "."
+			Return .F.
+		EndIf
+		lNovoCod := .T.
+		cLoja := StrZero(1, TamSX3(cPfx + "LOJA")[1])
+	EndIf
+
+	// ---- Cabeçalho do ExecAuto
+	fAddCpo(@aCab, cPfx + "COD"    , cCod)
+	fAddCpo(@aCab, cPfx + "LOJA"   , cLoja)
+	fAddCpo(@aCab, cPfx + "NOME"   , cNome)
+	fAddCpo(@aCab, cPfx + "NREDUZ" , cFantasia)
+	fAddCpo(@aCab, cPfx + "CGC"    , cCgc)
+	fAddCpo(@aCab, cPfx + "END"    , fTxt(cPfx + "END", oItem:GetJsonObject("dsEndereco")))
+	fAddCpo(@aCab, cPfx + "BAIRRO" , fTxt(cPfx + "BAIRRO", oItem:GetJsonObject("nmBairro")))
+	fAddCpo(@aCab, cPfx + "EST"    , cUF)
+	fAddCpo(@aCab, cPfx + "COD_MUN", cMun)
+	fAddCpo(@aCab, cPfx + "MUN"    , fTxt(cPfx + "MUN", cNomMun))
+	fAddCpo(@aCab, cPfx + "CEP"    , cCep)
+	fAddCpo(@aCab, cPfx + "PAIS"   , "105")
+	fAddCpo(@aCab, cPfx + "CODPAIS", "01058")
+	fAddCpo(@aCab, cPfx + "INSCR"  , cInscr)
+	fAddCpo(@aCab, cPfx + "MSBLQL" , "2")
+
+	If cAlias == "SA1"
+		fAddCpo(@aCab, "A1_PESSOA" , cPessoa)
+		fAddCpo(@aCab, "A1_TIPO"   , PadR(SuperGetMV("MV_XTPCLI", .F., "F"), TamSX3("A1_TIPO")[1]))
+		fAddCpo(@aCab, "A1_CONTRIB", IIf(cInscr == "ISENTO", "2", "1"))
+	Else
+		fAddCpo(@aCab, "A2_TIPO"   , cPessoa)
+	EndIf
+
+	If oItem:HasProperty("nrInscricaoMunicipal") .And. !Empty(U_xApiToChar(oItem:GetJsonObject("nrInscricaoMunicipal")))
+		fAddCpo(@aCab, cPfx + "INSCRM", fTxt(cPfx + "INSCRM", oItem:GetJsonObject("nrInscricaoMunicipal")))
+	EndIf
+	If oItem:HasProperty("dsEmail") .And. !Empty(U_xApiToChar(oItem:GetJsonObject("dsEmail")))
+		fAddCpo(@aCab, cPfx + "EMAIL", fTxt(cPfx + "EMAIL", oItem:GetJsonObject("dsEmail"), .F.))
+	EndIf
+	If oItem:HasProperty("nrDdd") .And. !Empty(U_xApiNum(oItem:GetJsonObject("nrDdd")))
+		fAddCpo(@aCab, cPfx + "DDD", Left(U_xApiNum(oItem:GetJsonObject("nrDdd")), TamSX3(cPfx + "DDD")[1]))
+	EndIf
+	If oItem:HasProperty("nrTelefone") .And. !Empty(U_xApiNum(oItem:GetJsonObject("nrTelefone")))
+		fAddCpo(@aCab, cPfx + "TEL", Left(U_xApiNum(oItem:GetJsonObject("nrTelefone")), TamSX3(cPfx + "TEL")[1]))
+	EndIf
+
+	aCab := FWVetByDic(aCab, cAlias, .F., 1)
+
+	// ---- Inclusão (tudo ou nada)
+	Begin Transaction
+
+		lMsErroAuto := .F.
+		If cAlias == "SA1"
+			MsExecAuto({|x, y, z| CRMA980(x, y, z)}, aCab, 3, {})
+		Else
+			MsExecAuto({|x, y| MATA020(x, y)}, aCab, 3)
+		EndIf
+
+		If lMsErroAuto
+			lOk := .F.
+			cErroAuto := U_xApiErroAuto()
+			DisarmTransaction()
+		EndIf
+
+	End Transaction
+
+	If !lOk
+		If lNovoCod
+			RollBackSX8()
+		EndIf
+		cErro := cErroAuto
+		cCod  := ""
+		Return .F.
+	EndIf
+
+	If lNovoCod
+		ConfirmSX8()
+	EndIf
+
+	// Confere a gravação
+	DbSelectArea(cAlias)
+	(cAlias)->(DbSetOrder(1))
+	If !(cAlias)->(DbSeek(xFilial(cAlias) + PadR(cCod, TamSX3(cPfx + "COD")[1]) + PadR(cLoja, TamSX3(cPfx + "LOJA")[1])))
+		cErro := "ExecAuto sem erro, mas o " + cRotulo + " " + cCod + "/" + cLoja + " não foi localizado após a inclusão."
+		cCod  := ""
+		Return .F.
+	EndIf
+
+	cSit := "INCLUIDO"
+
+Return .T.
+
+// Procura o cadastro pelo CNPJ/CPF (índice 3).
+// Retorno: 1 = existe no mesmo município (cCod/cLoja preenchidos, lBloq indica bloqueio)
+//          2 = existe o CNPJ em outro município (cCodBase = código a reaproveitar)
+//          0 = CNPJ não cadastrado
+Static Function fAchaCadastro(cAlias, cCgc, cMun, cCod, cLoja, cCodBase, lBloq)
+
+	Local cPfx   := IIf(cAlias == "SA1", "A1_", "A2_")
+	Local cChave := PadR(cCgc, TamSX3(cPfx + "CGC")[1])
+
+	cCod     := ""
+	cLoja    := ""
+	cCodBase := ""
+	lBloq    := .F.
+
+	DbSelectArea(cAlias)
+	(cAlias)->(DbSetOrder(3))
+	If (cAlias)->(DbSeek(xFilial(cAlias) + cChave))
+		While !(cAlias)->(Eof()) .And. (cAlias)->(FieldGet(FieldPos(cPfx + "FILIAL"))) == xFilial(cAlias) .And. (cAlias)->(FieldGet(FieldPos(cPfx + "CGC"))) == cChave
+			If AllTrim((cAlias)->(FieldGet(FieldPos(cPfx + "COD_MUN")))) == cMun
+				cCod  := (cAlias)->(FieldGet(FieldPos(cPfx + "COD")))
+				cLoja := (cAlias)->(FieldGet(FieldPos(cPfx + "LOJA")))
+				lBloq := (cAlias)->(FieldGet(FieldPos(cPfx + "MSBLQL"))) == "1"
+				Return 1
+			EndIf
+			If Empty(cCodBase)
+				cCodBase := (cAlias)->(FieldGet(FieldPos(cPfx + "COD")))
+			EndIf
+			(cAlias)->(DbSkip())
+		EndDo
+	EndIf
+
+Return IIf(Empty(cCodBase), 0, 2)
+
+// Próxima loja livre de um código já existente
+Static Function fProxLoja(cAlias, cCod)
+
+	Local cPfx  := IIf(cAlias == "SA1", "A1_", "A2_")
+	Local cCodP := PadR(cCod, TamSX3(cPfx + "COD")[1])
+	Local cLoja := Replicate("0", TamSX3(cPfx + "LOJA")[1])
+	Local cAtu  := ""
+
+	DbSelectArea(cAlias)
+	(cAlias)->(DbSetOrder(1))
+	If (cAlias)->(DbSeek(xFilial(cAlias) + cCodP))
+		While !(cAlias)->(Eof()) .And. (cAlias)->(FieldGet(FieldPos(cPfx + "FILIAL"))) == xFilial(cAlias) .And. (cAlias)->(FieldGet(FieldPos(cPfx + "COD"))) == cCodP
+			cAtu := (cAlias)->(FieldGet(FieldPos(cPfx + "LOJA")))
+			If cAtu > cLoja
+				cLoja := cAtu
+			EndIf
+			(cAlias)->(DbSkip())
+		EndDo
+	EndIf
+
+Return Soma1(cLoja)
+
+// Reserva o próximo código (SXE), pulando os já existentes. O chamador faz ConfirmSX8/RollBackSX8.
+Static Function fProxCod(cAlias)
+
+	Local cPfx  := IIf(cAlias == "SA1", "A1_", "A2_")
+	Local cNum  := ""
+	Local nTent := 0
+
+	DbSelectArea(cAlias)
+	(cAlias)->(DbSetOrder(1))
+	For nTent := 1 To 10
+		cNum := GetSxeNum(cAlias, cPfx + "COD", cPfx + "COD", 1)
+		If !(cAlias)->(DbSeek(xFilial(cAlias) + PadR(cNum, TamSX3(cPfx + "COD")[1])))
+			Exit
+		EndIf
+		ConfirmSX8()
+		cNum := ""
+	Next nTent
+
+Return cNum
+
+// Texto vindo do JSON (UTF-8) -> sem acento, maiúsculo (ou minúsculo se lUpper = .F.) e no tamanho do campo
+Static Function fTxt(cCampo, xVal, lUpper)
+
+	Local cRet := U_xApiToChar(xVal)
+	Local cDec := DecodeUTF8(cRet)
+
+	Default lUpper := .T.
+
+	If ValType(cDec) == "C" .And. !Empty(cDec)
+		cRet := cDec
+	EndIf
+	cRet := AllTrim(FwNoAccent(cRet))
+	cRet := IIf(lUpper, Upper(cRet), Lower(cRet))
+
+Return Left(cRet, TamSX3(cCampo)[1])
+
+// Acrescenta o campo ao ExecAuto somente se ele existir no dicionário (SX3)
+Static Function fAddCpo(aCab, cCampo, xVal)
+
+	If !Empty(FWSX3Util():GetFieldType(cCampo))
+		aAdd(aCab, {cCampo, xVal, Nil})
+	EndIf
+
+Return .T.
+
+//-----------------------------------------------------------------------------------------------------
+// Schema JSON desta API (validado pelo U_xApiVld do SchemaJSON.tlpp)
+//-----------------------------------------------------------------------------------------------------
+Static Function fSchema()
+
+	Local cSch := ""
+
+		cSch += '{' + CRLF
+		cSch += '  "title": "CadastroFornecedor",' + CRLF
+		cSch += '  "type": "object",' + CRLF
+		cSch += '  "required": ["body"],' + CRLF
+		cSch += '  "properties": {' + CRLF
+		cSch += '    "body": {' + CRLF
+		cSch += '      "type": "array",' + CRLF
+		cSch += '      "minItems": 1,' + CRLF
+		cSch += '      "maxItems": 200,' + CRLF
+		cSch += '      "items": {' + CRLF
+		cSch += '        "type": "object",' + CRLF
+		cSch += '        "required": [' + CRLF
+		cSch += '          "nrCpfCnpj",' + CRLF
+		cSch += '          "nmRazaoSocial",' + CRLF
+		cSch += '          "cdMunicipio",' + CRLF
+		cSch += '          "sgUf",' + CRLF
+		cSch += '          "dsEndereco",' + CRLF
+		cSch += '          "nmBairro",' + CRLF
+		cSch += '          "nrCep"' + CRLF
+		cSch += '        ],' + CRLF
+		cSch += '        "properties": {' + CRLF
+		cSch += '          "nrCpfCnpj": { "type": "string", "minLength": 11, "maxLength": 18, "pattern": "^[0-9./-]+$" },' + CRLF
+		cSch += '          "nmRazaoSocial": { "type": "string", "minLength": 1, "maxLength": 100 },' + CRLF
+		cSch += '          "nmFantasia": { "type": "string", "maxLength": 60 },' + CRLF
+		cSch += '          "cdMunicipio": { "type": "integer", "minimum": 1 },' + CRLF
+		cSch += '          "sgUf": { "type": "string", "pattern": "^[A-Za-z]{2}$" },' + CRLF
+		cSch += '          "dsEndereco": { "type": "string", "minLength": 1, "maxLength": 80 },' + CRLF
+		cSch += '          "nmBairro": { "type": "string", "minLength": 1, "maxLength": 50 },' + CRLF
+		cSch += '          "nrCep": { "type": "string", "pattern": "^[0-9]{5}-?[0-9]{3}$" },' + CRLF
+		cSch += '          "nrInscricaoEstadual": { "type": "string", "maxLength": 18 },' + CRLF
+		cSch += '          "nrInscricaoMunicipal": { "type": "string", "maxLength": 18 },' + CRLF
+		cSch += '          "dsEmail": { "type": "string", "maxLength": 100 },' + CRLF
+		cSch += '          "nrDdd": { "type": "string", "pattern": "^[0-9]{2,3}$" },' + CRLF
+		cSch += '          "nrTelefone": { "type": "string", "pattern": "^[0-9]{8,12}$" }' + CRLF
+		cSch += '        }' + CRLF
+		cSch += '      }' + CRLF
+		cSch += '    }' + CRLF
+		cSch += '  }' + CRLF
+		cSch += '}' + CRLF
+
+Return cSch

@@ -1,0 +1,412 @@
+#Include 'Protheus.ch'
+#Include 'TopConn.ch'
+#Include 'tlpp-core.th'
+#Include 'tlpp-rest.th'
+
+/*/{Protheus.doc} API_titulos_provisorios
+	API 01 - IncluirTituloProvisorio: inclui o PR a receber (cliente) e o PR a pagar (fornecedor) de cada transação.
+	Endpoint: POST /financeiro/titulos_provisorios (função U_API_titulos_provisorios), envelope {"body": [ ... ]}.
+
+	Compilar junto: api_infra.tlpp (ambiente, LOG ZGL e funções comuns) e SchemaJSON.tlpp (U_xApiVld).
+	Fluxo da requisição: ambiente -> LOG de início -> JSON -> Schema -> processamento -> LOG de término.
+	Parâmetros (SX6) utilizados:
+	MV_XTPPROV  Tipo do título provisório (default PR)
+	MV_XPFXPRV  Prefixo do título provisório (default GES)
+	MV_XNATPRR  Natureza do provisório a receber (obrigatório)
+	MV_XNATPRP  Natureza do provisório a pagar (obrigatório)
+	MV_XPRVDIA  Dias somados à emissão para o vencimento do provisório (default 0)
+
+	@type user function
+	@author Leandro Massafera
+	@since 05/11/2026
+	@version 1.0
+/*/
+
+// 05/11/2026 - Leandro Massafera - Fonte individual desta API (separado do antigo api_financeiro)
+
+//=====================================================================================================
+// API 01 - IncluirTituloProvisorio
+// Cada transação gera um PR a receber (vlRecebido, em nome do pagador/cliente) e um PR a pagar
+// (vlPago, em nome do beneficiário/fornecedor). O item inteiro é gravado ou descartado.
+// Reenvio do mesmo nrNfFornec não duplica: devolve os ids já existentes.
+//=====================================================================================================
+@Post("/financeiro/titulos_provisorios")
+Function U_API_titulos_provisorios()
+
+	Local cJSON      := oRest:GetBodyRequest()
+	Local oObj       := Nil
+	Local oRet       := JsonObject():New()
+	Local oTrans     := Nil
+	Local aBody      := {}
+	Local aNotas     := {}
+	Local aTrans     := {}
+	Local nI         := 0
+	Local nJ         := 0
+	Local nTotal     := 0
+	Local lErroGeral := .F.
+	Local cErro      := ""
+	Local cIdPag     := ""
+	Local cIdRec     := ""
+	Local cErrPag    := ""
+	Local cErrRec    := ""
+	Local cNrNf      := ""
+	Local aCtx       := {}
+	Local nOk        := 0
+	Local nErr       := 0
+
+	Private lMsErroAuto    := .F.
+	Private lMsHelpAuto    := .T.
+	Private lAutoErrNoFile := .T.
+
+	// Ambiente (empresa/filial) + LOG + validação do JSON contra o Schema
+	If !U_xApiAbre("titulos_provisorios", fSchema(), cJSON, @aCtx, @oObj, @aBody)
+		Return .T.
+	EndIf
+
+	// Limite de 1.000 transações por requisição
+	For nI := 1 To Len(aBody)
+		If ValType(aBody[nI]) == "J" .And. aBody[nI]:HasProperty("dadosNotas") .And. ValType(aBody[nI]:GetJsonObject("dadosNotas")) == "A"
+			nTotal += Len(aBody[nI]:GetJsonObject("dadosNotas"))
+		EndIf
+	Next nI
+	If nTotal == 0
+		U_xApiResp(aCtx, 400, U_xApiMsg('Body com estrutura inválida: nenhuma transação encontrada em "dadosNotas".'), "Nenhuma transação em dadosNotas.")
+		Return .T.
+	ElseIf nTotal > 1000
+		U_xApiResp(aCtx, 400, U_xApiMsg("Lote com " + cValToChar(nTotal) + " transações. O limite é de 1000 por requisição."), "Lote acima de 1000 transações.", nTotal, 0, nTotal)
+		Return .T.
+	EndIf
+
+	For nI := 1 To Len(aBody)
+		If ValType(aBody[nI]) <> "J" .Or. !aBody[nI]:HasProperty("dadosNotas") .Or. ValType(aBody[nI]:GetJsonObject("dadosNotas")) <> "A"
+			Loop
+		EndIf
+
+		aNotas := aBody[nI]:GetJsonObject("dadosNotas")
+		For nJ := 1 To Len(aNotas)
+			cIdPag  := ""
+			cIdRec  := ""
+			cErrPag := ""
+			cErrRec := ""
+			cNrNf   := ""
+
+			If ValType(aNotas[nJ]) == "J" .And. aNotas[nJ]:HasProperty("nrNfFornec")
+				cNrNf := U_xApiToChar(aNotas[nJ]:GetJsonObject("nrNfFornec"))
+			EndIf
+
+			oTrans := JsonObject():New()
+			oTrans["nrNfFornec"] := cNrNf
+
+			If ValType(aNotas[nJ]) <> "J"
+				cErrPag := "Item da lista dadosNotas inválido."
+				cErrRec := cErrPag
+			Else
+				fIncProv(aNotas[nJ], @cIdPag, @cIdRec, @cErrPag, @cErrRec)
+			EndIf
+
+			If Empty(cErrPag) .And. Empty(cErrRec)
+				nOk++
+				oTrans["idPagamento"]    := cIdPag
+				oTrans["idRecebimento"]  := cIdRec
+			Else
+				nErr++
+				lErroGeral := .T.
+				oTrans["erroPagamento"]   := cErrPag
+				oTrans["erroRecebimento"] := cErrRec
+				ConOut("API_FINANCEIRO -> titulos_provisorios nrNfFornec " + cNrNf + " ERRO: " + cErrPag + " " + cErrRec)
+			EndIf
+
+			aAdd(aTrans, oTrans)
+		Next nJ
+	Next nI
+
+	oRet["transacoes"] := aTrans
+
+	// Erro em qualquer item: HTTP 400, mas a resposta traz todos os itens (os gravados com seus ids)
+	U_xApiResp(aCtx, IIf(lErroGeral, 400, 200), oRet:ToJson(), IIf(lErroGeral, cValToChar(nErr) + " transação(ões) com erro.", ""), nOk + nErr, nOk, nErr)
+
+	FreeObj(oRet)
+	FreeObj(oObj)
+
+Return .T.
+
+//-----------------------------------------------------------------------------------------------------
+// Processa uma transação da API 01 (PR a receber + PR a pagar)
+//-----------------------------------------------------------------------------------------------------
+Static Function fIncProv(oNota, cIdPag, cIdRec, cErrPag, cErrRec)
+
+	Local aObrig    := {"nrCpfCnpjBeneficiario","cdMunicipioBeneficiario","nrCpfCnpjPagador","cdMunicipioPagador","dtEmissaoFornec","vlRecebido","vlPago","nrNfFornec"}
+	Local cFalta    := U_xApiFalta(oNota, aObrig)
+	Local dEmissao  := CToD("")
+	Local dVenc     := CToD("")
+	Local nVlRec    := 0
+	Local nVlPag    := 0
+	Local cCliente  := ""
+	Local cLojaCli  := ""
+	Local cFornece  := ""
+	Local cLojaFor  := ""
+	Local cErroCad  := ""
+	Local cTipo     := ""
+	Local cPrefixo  := ""
+	Local cNatRec   := ""
+	Local cNatPag   := ""
+	Local cNumero   := ""
+	Local cNrNf     := ""
+	Local cParcela  := ""
+	Local cErroAuto := ""
+	Local lExisteR  := .F.
+	Local lExisteP  := .F.
+	Local lOk       := .T.
+	Local aCab      := {}
+	Local cChave    := ""
+
+	If !Empty(cFalta)
+		cErrPag := "Atributos obrigatórios não informados: " + cFalta
+		cErrRec := cErrPag
+		Return .F.
+	EndIf
+
+	dEmissao := U_xApiData(oNota:GetJsonObject("dtEmissaoFornec"))
+	If Empty(dEmissao)
+		cErrPag := "dtEmissaoFornec inválida. Formato esperado: dd/mm/aaaa."
+		cErrRec := cErrPag
+		Return .F.
+	EndIf
+	dVenc := dEmissao + SuperGetMV("MV_XPRVDIA", .F., 0)
+
+	If ValType(oNota:GetJsonObject("vlRecebido")) <> "N" .Or. ValType(oNota:GetJsonObject("vlPago")) <> "N"
+		cErrPag := "vlRecebido e vlPago devem ser numéricos."
+		cErrRec := cErrPag
+		Return .F.
+	EndIf
+	nVlRec := Round(oNota:GetJsonObject("vlRecebido"), 2)
+	nVlPag := Round(oNota:GetJsonObject("vlPago"), 2)
+	If nVlRec <= 0
+		cErrRec := "vlRecebido deve ser maior que zero."
+	EndIf
+	If nVlPag <= 0
+		cErrPag := "vlPago deve ser maior que zero."
+	EndIf
+	If !Empty(cErrRec) .Or. !Empty(cErrPag)
+		Return .F.
+	EndIf
+
+	// Cliente (pagador) e fornecedor (beneficiário) reais
+	If !U_xApiCliFor("SA1", oNota:GetJsonObject("nrCpfCnpjPagador"), oNota:GetJsonObject("cdMunicipioPagador"), @cCliente, @cLojaCli, @cErroCad)
+		cErrRec := cErroCad
+	EndIf
+	cErroCad := ""
+	If !U_xApiCliFor("SA2", oNota:GetJsonObject("nrCpfCnpjBeneficiario"), oNota:GetJsonObject("cdMunicipioBeneficiario"), @cFornece, @cLojaFor, @cErroCad)
+		cErrPag := cErroCad
+	EndIf
+	If !Empty(cErrRec) .Or. !Empty(cErrPag)
+		Return .F.
+	EndIf
+
+	// Parametrizações
+	cTipo    := SuperGetMV("MV_XTPPROV", .F., "PR")
+	cPrefixo := SuperGetMV("MV_XPFXPRV", .F., "GES")
+	cNatRec  := AllTrim(SuperGetMV("MV_XNATPRR", .F., ""))
+	cNatPag  := AllTrim(SuperGetMV("MV_XNATPRP", .F., ""))
+
+	If !U_xApiNat(cNatRec)
+		cErrRec := "Natureza do provisório a receber (MV_XNATPRR) não parametrizada ou inexistente."
+	EndIf
+	If !U_xApiNat(cNatPag)
+		cErrPag := "Natureza do provisório a pagar (MV_XNATPRP) não parametrizada ou inexistente."
+	EndIf
+	If !Empty(cErrRec) .Or. !Empty(cErrPag)
+		Return .F.
+	EndIf
+
+	// Número do título = nrNfFornec (identificador da transação no Sistema Gestão)
+	cNrNf := U_xApiToChar(oNota:GetJsonObject("nrNfFornec"))
+	If Len(cNrNf) > TamSX3("E1_NUM")[1] .Or. Len(cNrNf) > TamSX3("E2_NUM")[1] .Or. !U_xApiDig(cNrNf)
+		cErrPag := "nrNfFornec " + cNrNf + " não cabe no número do título (E1_NUM/E2_NUM) ou não é numérico."
+		cErrRec := cErrPag
+		Return .F.
+	EndIf
+
+	// ---- Contas a Receber
+	cPrefixo := PadR(cPrefixo, TamSX3("E1_PREFIXO")[1])
+	cNumero  := PadL(cNrNf, TamSX3("E1_NUM")[1], "0")
+	cParcela := Space(TamSX3("E1_PARCELA")[1])
+	cTipo    := PadR(cTipo, TamSX3("E1_TIPO")[1])
+
+	DbSelectArea("SE1")
+	SE1->(DbSetOrder(1))
+	If SE1->(DbSeek(xFilial("SE1") + cPrefixo + cNumero + cParcela + cTipo))
+		If SE1->E1_CLIENTE + SE1->E1_LOJA <> cCliente + cLojaCli
+			cErrRec := "Já existe PR " + cNumero + " no Contas a Receber para outro cliente. Verifique o nrNfFornec."
+			Return .F.
+		EndIf
+		lExisteR := .T.
+	EndIf
+
+	// ---- Contas a Pagar
+	cPrefixo := PadR(cPrefixo, TamSX3("E2_PREFIXO")[1])
+	cNumero  := PadL(cNrNf, TamSX3("E2_NUM")[1], "0")
+	cParcela := Space(TamSX3("E2_PARCELA")[1])
+	cTipo    := PadR(cTipo, TamSX3("E2_TIPO")[1])
+
+	DbSelectArea("SE2")
+	SE2->(DbSetOrder(1))
+	If SE2->(DbSeek(xFilial("SE2") + cPrefixo + cNumero + cParcela + cTipo + cFornece + cLojaFor))
+		lExisteP := .T.
+	EndIf
+
+	Begin Transaction
+
+		// PR a receber
+		If !lExisteR
+			aCab := {}
+			aAdd(aCab, {"E1_PREFIXO", PadR(cPrefixo, TamSX3("E1_PREFIXO")[1])  , Nil})
+			aAdd(aCab, {"E1_NUM"    , PadL(cNrNf, TamSX3("E1_NUM")[1], "0")    , Nil})
+			aAdd(aCab, {"E1_PARCELA", Space(TamSX3("E1_PARCELA")[1])           , Nil})
+			aAdd(aCab, {"E1_TIPO"   , PadR(cTipo, TamSX3("E1_TIPO")[1])        , Nil})
+			aAdd(aCab, {"E1_NATUREZ", cNatRec                                  , Nil})
+			aAdd(aCab, {"E1_CLIENTE", cCliente                                 , Nil})
+			aAdd(aCab, {"E1_LOJA"   , cLojaCli                                 , Nil})
+			aAdd(aCab, {"E1_RATEIO" , "N"                                      , Nil})
+			aAdd(aCab, {"E1_MULTNAT", "2"                                      , Nil})
+			aAdd(aCab, {"E1_EMISSAO", dEmissao                                 , Nil})
+			aAdd(aCab, {"E1_VENCTO" , dVenc                                    , Nil})
+			aAdd(aCab, {"E1_VENCREA", DataValida(dVenc)                        , Nil})
+			aAdd(aCab, {"E1_VALOR"  , nVlRec                                   , Nil})
+			aAdd(aCab, {"E1_VLCRUZ" , nVlRec                                   , Nil})
+			aAdd(aCab, {"E1_MOEDA"  , 1                                        , Nil})
+			aAdd(aCab, {"E1_FLUXO"  , "S"                                      , Nil})
+			aAdd(aCab, {"E1_HIST"   , "GESTAO NF " + cNrNf                     , Nil})
+
+			If !fExecIncTit("SE1", aCab, @cErroAuto)
+				lOk := .F.
+				cErrRec := cErroAuto
+				DisarmTransaction()
+			EndIf
+		EndIf
+
+		// PR a pagar
+		If lOk .And. !lExisteP
+			aCab := {}
+			aAdd(aCab, {"E2_PREFIXO", PadR(cPrefixo, TamSX3("E2_PREFIXO")[1])  , Nil})
+			aAdd(aCab, {"E2_NUM"    , PadL(cNrNf, TamSX3("E2_NUM")[1], "0")    , Nil})
+			aAdd(aCab, {"E2_PARCELA", Space(TamSX3("E2_PARCELA")[1])           , Nil})
+			aAdd(aCab, {"E2_TIPO"   , PadR(cTipo, TamSX3("E2_TIPO")[1])        , Nil})
+			aAdd(aCab, {"E2_NATUREZ", cNatPag                                  , Nil})
+			aAdd(aCab, {"E2_FORNECE", cFornece                                 , Nil})
+			aAdd(aCab, {"E2_LOJA"   , cLojaFor                                 , Nil})
+			aAdd(aCab, {"E2_RATEIO" , "N"                                      , Nil})
+			aAdd(aCab, {"E2_MULTNAT", "2"                                      , Nil})
+			If SuperGetMV("MV_CTLIPAG", .F., .F.)
+				aAdd(aCab, {"E2_DATALIB", dDataBase                            , Nil})
+			EndIf
+			aAdd(aCab, {"E2_EMISSAO", dEmissao                                 , Nil})
+			aAdd(aCab, {"E2_VENCTO" , dVenc                                    , Nil})
+			aAdd(aCab, {"E2_VENCREA", DataValida(dVenc)                        , Nil})
+			aAdd(aCab, {"E2_VALOR"  , nVlPag                                   , Nil})
+			aAdd(aCab, {"E2_VLCRUZ" , nVlPag                                   , Nil})
+			aAdd(aCab, {"E2_MOEDA"  , 1                                        , Nil})
+			aAdd(aCab, {"E2_FLUXO"  , "S"                                      , Nil})
+			aAdd(aCab, {"E2_HIST"   , "GESTAO NF " + cNrNf                     , Nil})
+
+			If !fExecIncTit("SE2", aCab, @cErroAuto)
+				lOk := .F.
+				cErrPag := cErroAuto
+				cErrRec := "Revertido: falha na inclusão do PR a pagar da mesma transação."
+				DisarmTransaction()
+			EndIf
+		EndIf
+
+	End Transaction
+
+	If !lOk
+		Return .F.
+	EndIf
+
+	// Identificadores (FK7_IDDOC) dos dois títulos
+	cChave := PadR(cPrefixo, TamSX3("E1_PREFIXO")[1]) + PadL(cNrNf, TamSX3("E1_NUM")[1], "0") + Space(TamSX3("E1_PARCELA")[1]) + PadR(cTipo, TamSX3("E1_TIPO")[1]) + cCliente + cLojaCli
+	cIdRec := U_xApiFK7Id("SE1", cChave)
+	cChave := PadR(cPrefixo, TamSX3("E2_PREFIXO")[1]) + PadL(cNrNf, TamSX3("E2_NUM")[1], "0") + Space(TamSX3("E2_PARCELA")[1]) + PadR(cTipo, TamSX3("E2_TIPO")[1]) + cFornece + cLojaFor
+	cIdPag := U_xApiFK7Id("SE2", cChave)
+
+	If Empty(cIdRec) .Or. Empty(cIdPag)
+		cErrRec := IIf(Empty(cIdRec), "Título a receber gravado, mas FK7_IDDOC não localizado.", "")
+		cErrPag := IIf(Empty(cIdPag), "Título a pagar gravado, mas FK7_IDDOC não localizado.", "")
+		Return .F.
+	EndIf
+
+Return .T.
+
+Static Function fExecIncTit(cTab, aCab, cErro)
+
+	Private lMsErroAuto    := .F.
+	Private lMsHelpAuto    := .T.
+	Private lAutoErrNoFile := .T.
+
+	If cTab == "SE1"
+		MsExecAuto({|x, y| FINA040(x, y)}, aCab, 3)
+	Else
+		MsExecAuto({|x, y, z| FINA050(x, y, z)}, aCab, , 3)
+	EndIf
+
+	If lMsErroAuto
+		cErro := U_xApiErroAuto()
+		Return .F.
+	EndIf
+
+Return .T.
+
+//-----------------------------------------------------------------------------------------------------
+// Schema JSON desta API (validado pelo U_xApiVld do SchemaJSON.tlpp)
+//-----------------------------------------------------------------------------------------------------
+Static Function fSchema()
+
+	Local cSch := ""
+
+		cSch += '{' + CRLF
+		cSch += '  "title": "IncluirTituloProvisorio",' + CRLF
+		cSch += '  "type": "object",' + CRLF
+		cSch += '  "required": ["body"],' + CRLF
+		cSch += '  "properties": {' + CRLF
+		cSch += '    "body": {' + CRLF
+		cSch += '      "type": "array",' + CRLF
+		cSch += '      "minItems": 1,' + CRLF
+		cSch += '      "items": {' + CRLF
+		cSch += '        "type": "object",' + CRLF
+		cSch += '        "required": ["dadosNotas"],' + CRLF
+		cSch += '        "properties": {' + CRLF
+		cSch += '          "dadosNotas": {' + CRLF
+		cSch += '            "type": "array",' + CRLF
+		cSch += '            "minItems": 1,' + CRLF
+		cSch += '            "maxItems": 1000,' + CRLF
+		cSch += '            "items": {' + CRLF
+		cSch += '              "type": "object",' + CRLF
+		cSch += '              "required": [' + CRLF
+		cSch += '                "nrCpfCnpjBeneficiario",' + CRLF
+		cSch += '                "cdMunicipioBeneficiario",' + CRLF
+		cSch += '                "nrCpfCnpjPagador",' + CRLF
+		cSch += '                "cdMunicipioPagador",' + CRLF
+		cSch += '                "dtEmissaoFornec",' + CRLF
+		cSch += '                "vlRecebido",' + CRLF
+		cSch += '                "vlPago",' + CRLF
+		cSch += '                "nrNfFornec"' + CRLF
+		cSch += '              ],' + CRLF
+		cSch += '              "properties": {' + CRLF
+		cSch += '                "nrCpfCnpjBeneficiario": { "type": "string", "minLength": 11, "maxLength": 18, "pattern": "^[0-9./-]+$" },' + CRLF
+		cSch += '                "cdMunicipioBeneficiario": { "type": "integer", "minimum": 1 },' + CRLF
+		cSch += '                "nrCpfCnpjPagador": { "type": "string", "minLength": 11, "maxLength": 18, "pattern": "^[0-9./-]+$" },' + CRLF
+		cSch += '                "cdMunicipioPagador": { "type": "integer", "minimum": 1 },' + CRLF
+		cSch += '                "dtEmissaoFornec": { "type": "string", "pattern": "^[0-9]{2}/[0-9]{2}/[0-9]{4}$" },' + CRLF
+		cSch += '                "vlRecebido": { "type": "number", "exclusiveMinimum": 0 },' + CRLF
+		cSch += '                "vlPago": { "type": "number", "exclusiveMinimum": 0 },' + CRLF
+		cSch += '                "nrNfFornec": { "type": "integer", "minimum": 1 }' + CRLF
+		cSch += '              }' + CRLF
+		cSch += '            }' + CRLF
+		cSch += '          }' + CRLF
+		cSch += '        }' + CRLF
+		cSch += '      }' + CRLF
+		cSch += '    }' + CRLF
+		cSch += '  }' + CRLF
+		cSch += '}' + CRLF
+
+Return cSch

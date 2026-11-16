@@ -1,0 +1,18 @@
+{
+    "body": [
+        {
+            "dadosNotas": [
+                {
+                    "nrCpfCnpjBeneficiario": "70260588000106",
+                    "cdMunicipioBeneficiario": 1302603,
+                    "nrCpfCnpjPagador": "29421649000168",
+                    "cdMunicipioPagador": 1302603,
+                    "dtEmissaoFornec": "09/06/2026",
+                    "vlRecebido": 200,
+                    "vlPago": 199.6,
+                    "nrNfFornec": 2006554
+                }
+            ]
+        }
+    ]
+}

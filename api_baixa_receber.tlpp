@@ -1,0 +1,341 @@
+#Include 'Protheus.ch'
+#Include 'TopConn.ch'
+#Include 'tlpp-core.th'
+#Include 'tlpp-rest.th'
+
+/*/{Protheus.doc} API_baixa_receber
+	API 06 - BaixaReceber: baixa as faturas de clientes (FINA070).
+	Endpoint: POST /financeiro/baixa_receber (função U_API_baixa_receber), envelope {"body": [ ... ]}.
+
+	Compilar junto: api_infra.tlpp (ambiente, LOG ZGL e funções comuns) e SchemaJSON.tlpp (U_xApiVld).
+	Fluxo da requisição: ambiente -> LOG de início -> JSON -> Schema -> processamento -> LOG de término.
+	Parâmetros (SX6) utilizados:
+	MV_XTPPROV  Tipo do título provisório (default PR)
+	MV_XBXBCO / MV_XBXAGE / MV_XBXCTA  Banco, agência e conta padrão (quando o JSON não trouxer)
+
+	@type user function
+	@author Leandro Massafera
+	@since 05/11/2026
+	@version 1.0
+/*/
+
+// 05/11/2026 - Leandro Massafera - Fonte individual desta API (separado do antigo api_financeiro)
+
+//=====================================================================================================
+// API 06 - BaixaReceber
+// Baixa as faturas (idFatura = FK7_IDDOC devolvido pelas APIs 03/04) de um cliente/fornecedor.
+// Atributos OPCIONAIS acrescentados à spec: codigoBanco, agenciaBanco, contaBanco. Quando não
+// vierem, usa MV_XBXBCO / MV_XBXAGE / MV_XBXCTA. Motivo de baixa: NOR.
+//=====================================================================================================
+@Post("/financeiro/baixa_receber")
+Function U_API_baixa_receber()
+	fBaixa("SE1")
+Return .T.
+
+Static Function fBaixa(cTab)
+
+	Local cJSON      := oRest:GetBodyRequest()
+	Local oObj       := Nil
+	Local oRet       := JsonObject():New()
+	Local oProc      := Nil
+	Local aBody      := {}
+	Local aProcessos := {}
+	Local nI         := 0
+	Local lErroGeral := .F.
+	Local cErro      := ""
+	Local cIdProc    := ""
+	Local aCtx       := {}
+	Local nOk        := 0
+	Local nErr       := 0
+
+	Private lMsErroAuto    := .F.
+	Private lMsHelpAuto    := .T.
+	Private lAutoErrNoFile := .T.
+
+	If !U_xApiAbre(IIf(cTab == "SE1", "baixa_receber", "baixa_pagar"), fSchema(), cJSON, @aCtx, @oObj, @aBody)
+		Return .T.
+	EndIf
+
+	For nI := 1 To Len(aBody)
+		cIdProc := ""
+		cErro   := ""
+		oProc   := JsonObject():New()
+
+		If ValType(aBody[nI]) <> "J"
+			cErro := "Item inválido."
+		Else
+			fBaixaItem(aBody[nI], cTab, @cIdProc, @cErro)
+		EndIf
+
+		If Empty(cErro) .And. !Empty(cIdProc)
+			nOk++
+			oProc["idProcesso"] := cIdProc
+		Else
+			nErr++
+			lErroGeral := .T.
+			oProc["erro"] := cErro
+			ConOut("API_FINANCEIRO -> baixa " + cTab + " ERRO: " + cErro)
+		EndIf
+		aAdd(aProcessos, oProc)
+	Next nI
+
+	oRet["processos"] := aProcessos
+
+	U_xApiResp(aCtx, IIf(lErroGeral, 400, 200), oRet:ToJson(), IIf(lErroGeral, cValToChar(nErr) + " item(ns) com erro.", ""), nOk + nErr, nOk, nErr)
+
+	FreeObj(oRet)
+	FreeObj(oObj)
+
+Return .T.
+
+//-----------------------------------------------------------------------------------------------------
+// Baixa um item (CNPJ + data + lista de faturas). Todas as faturas do item são baixadas ou nenhuma.
+// idProcesso devolvido = E5_IDORIG (FK1_IDFK1 / FK2_IDFK2) da primeira baixa gerada.
+//-----------------------------------------------------------------------------------------------------
+Static Function fBaixaItem(oItem, cTab, cIdProc, cErro)
+
+	Local aObrig    := {"nrCpfCnpj","dtPagamento","idsDocumentos"}
+	Local cFalta    := U_xApiFalta(oItem, aObrig)
+	Local cPfx      := IIf(cTab == "SE1", "E1_", "E2_")
+	Local cCampoCF  := IIf(cTab == "SE1", "CLIENTE", "FORNECE")
+	Local cAliasCF  := IIf(cTab == "SE1", "SA1", "SA2")
+	Local cTipoPR   := AllTrim(SuperGetMV("MV_XTPPROV", .F., "PR"))
+	Local cCnpj     := ""
+	Local aIdsJson  := {}
+	Local aDocs     := {}
+	Local aRecs     := {}
+	Local aBx       := {}
+	Local dPag      := CToD("")
+	Local cBanco    := ""
+	Local cAgencia  := ""
+	Local cConta    := ""
+	Local cId       := ""
+	Local cErroLoc  := ""
+	Local cErroAuto := ""
+	Local cCgcTit   := ""
+	Local nRec      := 0
+	Local nSaldo    := 0
+	Local nK        := 0
+	Local lOk       := .T.
+
+	Private lMsErroAuto    := .F.
+	Private lMsHelpAuto    := .T.
+	Private lAutoErrNoFile := .T.
+
+	If !Empty(cFalta)
+		cErro := "Atributos obrigatórios não informados: " + cFalta
+		Return .F.
+	EndIf
+
+	cCnpj := U_xApiNum(oItem:GetJsonObject("nrCpfCnpj"))
+	dPag  := U_xApiData(oItem:GetJsonObject("dtPagamento"))
+	If Empty(dPag)
+		cErro := "dtPagamento inválida. Formato esperado: dd/mm/aaaa."
+		Return .F.
+	ElseIf dPag > dDataBase
+		cErro := "dtPagamento (" + DToC(dPag) + ") posterior à data base do Protheus (" + DToC(dDataBase) + ")."
+		Return .F.
+	EndIf
+
+	If ValType(oItem:GetJsonObject("idsDocumentos")) <> "A" .Or. Len(oItem:GetJsonObject("idsDocumentos")) == 0
+		cErro := "idsDocumentos deve ser uma lista com ao menos uma fatura."
+		Return .F.
+	EndIf
+	aIdsJson := oItem:GetJsonObject("idsDocumentos")
+
+	// ---- Banco/agência/conta (JSON ou parâmetros)
+	cBanco   := IIf(oItem:HasProperty("codigoBanco")  .And. !Empty(oItem:GetJsonObject("codigoBanco")),  AllTrim(oItem:GetJsonObject("codigoBanco")),  AllTrim(SuperGetMV("MV_XBXBCO", .F., "")))
+	cAgencia := IIf(oItem:HasProperty("agenciaBanco") .And. !Empty(oItem:GetJsonObject("agenciaBanco")), AllTrim(oItem:GetJsonObject("agenciaBanco")), AllTrim(SuperGetMV("MV_XBXAGE", .F., "")))
+	cConta   := IIf(oItem:HasProperty("contaBanco")   .And. !Empty(oItem:GetJsonObject("contaBanco")),   AllTrim(oItem:GetJsonObject("contaBanco")),   AllTrim(SuperGetMV("MV_XBXCTA", .F., "")))
+	If Empty(cBanco) .Or. Empty(cAgencia) .Or. Empty(cConta)
+		cErro := "Dados bancários não informados (codigoBanco/agenciaBanco/contaBanco) e parâmetros MV_XBXBCO/MV_XBXAGE/MV_XBXCTA em branco."
+		Return .F.
+	EndIf
+	DbSelectArea("SA6")
+	SA6->(DbSetOrder(1))
+	If !SA6->(DbSeek(xFilial("SA6") + PadR(cBanco, TamSX3("A6_COD")[1]) + PadR(cAgencia, TamSX3("A6_AGENCIA")[1]) + PadR(cConta, TamSX3("A6_CONTA")[1])))
+		cErro := "Banco " + cBanco + " / agência " + cAgencia + " / conta " + cConta + " não encontrados no cadastro de bancos do Protheus."
+		Return .F.
+	EndIf
+	cBanco   := SA6->A6_COD
+	cAgencia := SA6->A6_AGENCIA
+	cConta   := SA6->A6_CONTA
+
+	// ---- Validação das faturas
+	For nK := 1 To Len(aIdsJson)
+		cId := U_xApiToChar(aIdsJson[nK])
+		If aScan(aDocs, cId) > 0
+			cErro := "Documento " + cId + " informado em duplicidade."
+			Return .F.
+		EndIf
+		aAdd(aDocs, cId)
+	Next nK
+
+	For nK := 1 To Len(aDocs)
+		cId := aDocs[nK]
+		If !U_xApiLocTit(cId, cTab, @nRec, @cErroLoc)
+			cErro := "Documento " + cId + ": " + cErroLoc
+			Return .F.
+		EndIf
+
+		If AllTrim(U_xApiCampo(cTab, cPfx + "TIPO", nRec)) == cTipoPR
+			cErro := "Documento " + cId + " ainda é um título provisório. Feche a fatura antes da baixa."
+			Return .F.
+		EndIf
+
+		nSaldo := U_xApiCampo(cTab, cPfx + "SALDO", nRec)
+		If nSaldo <= 0
+			cErro := "Documento " + cId + " não possui saldo em aberto (já baixado)."
+			Return .F.
+		EndIf
+
+		// O CNPJ informado deve ser o do cliente/fornecedor do título
+		DbSelectArea(cAliasCF)
+		(cAliasCF)->(DbSetOrder(1))
+		If !(cAliasCF)->(DbSeek(xFilial(cAliasCF) + U_xApiCampo(cTab, cPfx + cCampoCF, nRec) + U_xApiCampo(cTab, cPfx + "LOJA", nRec)))
+			cErro := "Documento " + cId + ": cadastro do " + IIf(cTab == "SE1", "cliente", "fornecedor") + " do título não encontrado."
+			Return .F.
+		EndIf
+		cCgcTit := U_xApiNum(U_xApiCampo(cAliasCF, IIf(cTab == "SE1", "A1_CGC", "A2_CGC"), (cAliasCF)->(Recno())))
+		If cCgcTit <> cCnpj
+			cErro := "Documento " + cId + " não pertence ao CNPJ " + cCnpj + "."
+			Return .F.
+		EndIf
+
+		aAdd(aRecs, nRec)
+	Next nK
+
+	// ---- Baixas (tudo ou nada)
+	Begin Transaction
+
+		For nK := 1 To Len(aRecs)
+			DbSelectArea(cTab)
+			(cTab)->(DbSetOrder(1))
+			(cTab)->(DbGoTo(aRecs[nK]))
+			nSaldo := U_xApiCampo(cTab, cPfx + "SALDO", aRecs[nK])
+
+			aBx := {}
+			aAdd(aBx, {cPfx + "PREFIXO", U_xApiCampo(cTab, cPfx + "PREFIXO", aRecs[nK]), Nil})
+			aAdd(aBx, {cPfx + "NUM"    , U_xApiCampo(cTab, cPfx + "NUM"    , aRecs[nK]), Nil})
+			aAdd(aBx, {cPfx + "PARCELA", U_xApiCampo(cTab, cPfx + "PARCELA", aRecs[nK]), Nil})
+			aAdd(aBx, {cPfx + "TIPO"   , U_xApiCampo(cTab, cPfx + "TIPO"   , aRecs[nK]), Nil})
+			If cTab == "SE2"
+				aAdd(aBx, {"E2_FORNECE", U_xApiCampo(cTab, "E2_FORNECE", aRecs[nK]), Nil})
+				aAdd(aBx, {"E2_LOJA"   , U_xApiCampo(cTab, "E2_LOJA"   , aRecs[nK]), Nil})
+			EndIf
+			aAdd(aBx, {"AUTMOTBX"   , "NOR"                          , Nil})
+			aAdd(aBx, {"AUTBANCO"   , cBanco                         , Nil})
+			aAdd(aBx, {"AUTAGENCIA" , cAgencia                       , Nil})
+			aAdd(aBx, {"AUTCONTA"   , cConta                         , Nil})
+			aAdd(aBx, {"AUTDTBAIXA" , dPag                           , Nil})
+			aAdd(aBx, {"AUTDTCREDITO", dPag                          , Nil})
+			aAdd(aBx, {"AUTHIST"    , "BAIXA GESTAO " + PadR(aDocs[nK], 12), Nil})
+			If cTab == "SE1"
+				aAdd(aBx, {"AUTJUROS"  , 0                           , Nil})
+				aAdd(aBx, {"AUTVALREC" , nSaldo                      , Nil})
+			Else
+				aAdd(aBx, {"AUTVLRPG"  , nSaldo                      , Nil})
+			EndIf
+
+			lMsErroAuto := .F.
+			If cTab == "SE1"
+				MsExecAuto({|x, y| FINA070(x, y)}, aBx, 3)
+			Else
+				MsExecAuto({|x, y| FINA080(x, y)}, aBx, 3)
+			EndIf
+
+			If lMsErroAuto
+				lOk := .F.
+				cErroAuto := U_xApiErroAuto()
+				cErro := "Documento " + aDocs[nK] + ": " + cErroAuto
+				DisarmTransaction()
+				Exit
+			EndIf
+
+			If nK == 1
+				cIdProc := fIdBaixa(cTab, aRecs[nK])
+			EndIf
+		Next nK
+
+	End Transaction
+
+	If !lOk
+		cIdProc := ""
+		Return .F.
+	EndIf
+
+	If Empty(cIdProc)
+		cErro := "Baixa realizada, mas o identificador do movimento (E5_IDORIG) não foi localizado."
+		Return .F.
+	EndIf
+
+Return .T.
+
+// E5_IDORIG (FK1_IDFK1 / FK2_IDFK2) da última baixa efetiva do título
+Static Function fIdBaixa(cTab, nRecTit)
+
+	Local cPfx   := IIf(cTab == "SE1", "E1_", "E2_")
+	Local cRecPag := IIf(cTab == "SE1", "R", "P")
+	Local cQry   := ""
+	Local cRs    := GetNextAlias()
+	Local cId    := ""
+	Local nRec   := 0
+
+	cQry := "SELECT MAX(R_E_C_N_O_) AS REC FROM " + RetSqlName("SE5") + " "
+	cQry += "WHERE E5_FILIAL = '" + xFilial("SE5") + "' "
+	cQry += "AND E5_PREFIXO = '" + U_xApiCampo(cTab, cPfx + "PREFIXO", nRecTit) + "' "
+	cQry += "AND E5_NUMERO = '" + U_xApiCampo(cTab, cPfx + "NUM", nRecTit) + "' "
+	cQry += "AND E5_PARCELA = '" + U_xApiCampo(cTab, cPfx + "PARCELA", nRecTit) + "' "
+	cQry += "AND E5_TIPO = '" + U_xApiCampo(cTab, cPfx + "TIPO", nRecTit) + "' "
+	cQry += "AND E5_CLIFOR = '" + U_xApiCampo(cTab, cPfx + IIf(cTab == "SE1", "CLIENTE", "FORNECE"), nRecTit) + "' "
+	cQry += "AND E5_LOJA = '" + U_xApiCampo(cTab, cPfx + "LOJA", nRecTit) + "' "
+	cQry += "AND E5_RECPAG = '" + cRecPag + "' "
+	cQry += "AND E5_TIPODOC IN ('VL','BA') AND E5_SITUACA <> 'C' AND D_E_L_E_T_ = ' ' "
+	cQry := ChangeQuery(cQry)
+	TcQuery cQry New Alias (cRs)
+
+	If !(cRs)->(Eof())
+		nRec := (cRs)->REC
+	EndIf
+	(cRs)->(DbCloseArea())
+
+	If nRec > 0
+		DbSelectArea("SE5")
+		SE5->(DbGoTo(nRec))
+		cId := AllTrim(SE5->E5_IDORIG)
+	EndIf
+
+Return cId
+
+//-----------------------------------------------------------------------------------------------------
+// Schema JSON desta API (validado pelo U_xApiVld do SchemaJSON.tlpp)
+//-----------------------------------------------------------------------------------------------------
+Static Function fSchema()
+
+	Local cSch := ""
+
+		cSch += '{' + CRLF
+		cSch += '  "title": "BaixaReceber",' + CRLF
+		cSch += '  "type": "object",' + CRLF
+		cSch += '  "required": ["body"],' + CRLF
+		cSch += '  "properties": {' + CRLF
+		cSch += '    "body": {' + CRLF
+		cSch += '      "type": "array",' + CRLF
+		cSch += '      "minItems": 1,' + CRLF
+		cSch += '      "items": {' + CRLF
+		cSch += '        "type": "object",' + CRLF
+		cSch += '        "required": ["nrCpfCnpj", "dtPagamento", "idsDocumentos"],' + CRLF
+		cSch += '        "properties": {' + CRLF
+		cSch += '          "nrCpfCnpj": { "type": "string", "minLength": 11, "maxLength": 18, "pattern": "^[0-9./-]+$" },' + CRLF
+		cSch += '          "dtPagamento": { "type": "string", "pattern": "^[0-9]{2}/[0-9]{2}/[0-9]{4}$" },' + CRLF
+		cSch += '          "idsDocumentos": { "type": "array", "minItems": 1, "maxItems": 1000 },' + CRLF
+		cSch += '          "codigoBanco": { "type": "string" },' + CRLF
+		cSch += '          "agenciaBanco": { "type": "string" },' + CRLF
+		cSch += '          "contaBanco": { "type": "string" }' + CRLF
+		cSch += '        }' + CRLF
+		cSch += '      }' + CRLF
+		cSch += '    }' + CRLF
+		cSch += '  }' + CRLF
+		cSch += '}' + CRLF
+
+Return cSch

@@ -1,0 +1,25 @@
+#Include "tlpp-core.th"
+ 
+#Define _rest_oAuth2_secret_ 'secret_do_cliente'
+#Define _rest_oAuth2_access_expires 3600
+#Define _rest_oAuth2_refresh_expires 'Date()+1'
+#Define _rest_oAuth2_client_id 'id_do_cliente'
+#Define _rest_oAuth2_user 'Usuario.Integracao'
+#Define _rest_oAuth2_password '@Totvs2026'
+ 
+User Function paramsProvider()
+ 
+  Local jTlppParams := JSonObject():New()
+  Local cTlppParams := '{'+;
+    '"client_id":"'+_rest_oAuth2_client_id+'",'+;
+    '"client_secret":"'+_rest_oAuth2_secret_+'",'+;
+    '"username":"'+_rest_oAuth2_user+'",'+;
+    '"password":"'+ _rest_oAuth2_password+'",'+;
+    '"access_expires":'+cValToChar(_rest_oAuth2_access_expires)+','+;
+    '"refresh_expires":"'+_rest_oAuth2_refresh_expires+'",'+;
+    '"grant_type" : "password"'+;
+    '}'
+ 
+  jTlppParams:fromJson(cTlppParams)
+ 
+Return jTlppParams
